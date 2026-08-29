@@ -1,0 +1,405 @@
+#!/usr/bin/env python3
+"""Manage and call local models: registry, server, pull from Hugging Face.
+
+The registry lives at $LOCAL_MODELS_HOME/models.json (default ~/Models).
+Weights live beside it and never belong in git.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import mimetypes
+import os
+import shutil
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+
+def models_home() -> Path:
+    return Path(os.environ.get("LOCAL_MODELS_HOME", str(Path.home() / "Models"))).expanduser()
+
+
+def registry_path() -> Path:
+    return models_home() / "models.json"
+
+
+def registry() -> dict:
+    try:
+        return json.loads(registry_path().read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"Cannot read {registry_path()}: {exc}")
+
+
+def write_registry(data: dict) -> None:
+    path = registry_path()
+    if path.exists():
+        shutil.copy2(path, path.with_suffix(".json.bak"))
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+
+
+def resolve(name: str, data: dict) -> tuple[str, dict]:
+    key = data.get("aliases", {}).get(name, name)
+    model = data.get("models", {}).get(key)
+    if not model:
+        choices = ", ".join(sorted(data.get("models", {})))
+        raise SystemExit(f"Unknown model '{name}'. Available: {choices}")
+    path = Path(model["path"]).expanduser()
+    if not path.exists():
+        raise SystemExit(f"Model path is missing: {path}")
+    return key, model
+
+
+def request(data: dict, path: str, payload: dict | None = None, timeout: int = 180):
+    url = data["server"]["base_url"].rstrip("/") + path
+    body = None if payload is None else json.dumps(payload).encode()
+    req = urllib.request.Request(
+        url,
+        data=body,
+        method="GET" if payload is None else "POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode(errors="replace")
+        raise SystemExit(f"Local model server returned HTTP {exc.code}: {detail}")
+    except OSError as exc:
+        raise SystemExit(
+            f"Local model server is unavailable at {url}: {exc}\n"
+            "Check it with: local-model status"
+        )
+
+
+def chat(data: dict, model: dict, content, max_tokens: int, timeout: int) -> dict:
+    return request(
+        data,
+        "/chat/completions",
+        {
+            "model": str(Path(model["path"]).expanduser()),
+            "temperature": 0,
+            "max_tokens": max_tokens,
+            "stream": False,
+            "messages": [{"role": "user", "content": content}],
+        },
+        timeout,
+    )
+
+
+def response_text(result: dict) -> str:
+    try:
+        return result["choices"][0]["message"]["content"].strip()
+    except (KeyError, IndexError, TypeError, AttributeError):
+        raise SystemExit("Unexpected server response:\n" + json.dumps(result, indent=2))
+
+
+def image_content(image: Path, prompt: str) -> list[dict]:
+    if not image.is_file():
+        raise SystemExit(f"Image not found: {image}")
+    mime = mimetypes.guess_type(image.name)[0] or "image/png"
+    encoded = base64.b64encode(image.read_bytes()).decode()
+    return [
+        {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}},
+        {"type": "text", "text": prompt},
+    ]
+
+
+def human_size(value: int) -> str:
+    size = float(value)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{size:.1f}{unit}" if unit != "B" else f"{int(size)}B"
+        size /= 1024
+    return str(value)
+
+
+def tree_size(path: Path) -> int:
+    if path.is_file():
+        return path.stat().st_size
+    return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+
+
+# -- read commands ---------------------------------------------------------
+
+
+def cmd_list(args) -> None:
+    data = registry()
+    default = data.get("default")
+    print(f"{'DEFAULT':7}  {'ID':18}  {'SIZE':7}  {'FORMAT':10}  CAPABILITIES")
+    for key, model in data["models"].items():
+        mark = "yes" if key == default else ""
+        caps = ",".join(model.get("capabilities", []))
+        bits = model.get("quantization_bits")
+        fmt = f"{model.get('format', '?')}{f' {bits}bit' if bits else ''}"
+        print(f"{mark:7}  {key:18}  {human_size(model.get('size_bytes', 0)):7}  {fmt:10}  {caps}")
+        if args.verbose:
+            print(f"         {model['path']}\n         {model.get('role', '')}")
+
+
+def cmd_status(_args) -> None:
+    data = registry()
+    status = request(data, "/health", timeout=5)
+    loaded = status.get("loaded_model") or "none"
+    for key, model in data["models"].items():
+        if loaded == str(Path(model["path"]).expanduser()):
+            loaded = key
+            break
+    print(f"server: {status.get('status', 'unknown')}")
+    print(f"endpoint: {data['server']['base_url']}")
+    print(f"loaded: {loaded}")
+    print(f"default: {data.get('default')}")
+
+
+def cmd_path(args) -> None:
+    data = registry()
+    _, model = resolve(args.model, data)
+    print(str(Path(model["path"]).expanduser()))
+
+
+def cmd_ask(args) -> None:
+    data = registry()
+    _, model = resolve(args.model, data)
+    print(response_text(chat(data, model, args.prompt, args.max_tokens, args.timeout)))
+
+
+def cmd_vision(args) -> None:
+    data = registry()
+    _, model = resolve(args.model, data)
+    content = image_content(Path(args.image).expanduser(), args.prompt)
+    print(response_text(chat(data, model, content, args.max_tokens, args.timeout)))
+
+
+def cmd_use(args) -> None:
+    data = registry()
+    key, model = resolve(args.model, data)
+    result = chat(data, model, "Reply with OK only.", 8, args.timeout)
+    print(f"loaded: {key}")
+    print(response_text(result))
+
+
+def cmd_unload(_args) -> None:
+    data = registry()
+    result = request(data, "/unload", {}, timeout=30)
+    print(result.get("message", json.dumps(result)))
+
+
+def cmd_benchmark(args) -> None:
+    data = registry()
+    image = Path(args.image or models_home() / "test-fixtures" / "vision-test.png").expanduser()
+    prompt = args.prompt or (
+        "Read the exact heading and number, then name the two colored shapes. Answer in one line."
+    )
+    for key, model in data["models"].items():
+        if "vision" not in model.get("capabilities", []):
+            continue
+        start = time.perf_counter()
+        result = chat(data, model, image_content(image, prompt), args.max_tokens, args.timeout)
+        elapsed = time.perf_counter() - start
+        print(f"{key}\t{elapsed:.2f}s\t{response_text(result).replace(chr(10), ' ')}")
+
+
+# -- registry commands (pull / add / rm) -----------------------------------
+
+
+def infer_shape(path: Path, backend: str | None, capabilities: str | None) -> tuple[str, list[str], str]:
+    """Return (backend, capabilities, format), inferring from the artifact when not given."""
+    if path.is_file() and path.suffix == ".gguf":
+        inferred = ("llama-gguf", ["completion"], "GGUF")
+    elif path.is_dir():
+        config = {}
+        config_path = path / "config.json"
+        if config_path.is_file():
+            try:
+                config = json.loads(config_path.read_text())
+            except json.JSONDecodeError:
+                config = {}
+        looks_vision = (path / "preprocessor_config.json").is_file() or "vision_config" in config or "vl" in str(
+            config.get("model_type", "")
+        )
+        if looks_vision:
+            inferred = ("mlx-vlm", ["text", "image", "vision"], "MLX")
+        else:
+            inferred = ("mlx-lm", ["text"], "MLX")
+    else:
+        inferred = ("unknown", [], "unknown")
+
+    chosen_backend = backend or inferred[0]
+    chosen_caps = capabilities.split(",") if capabilities else inferred[1]
+    if chosen_backend == "unknown" and not backend:
+        raise SystemExit(
+            f"Cannot infer a backend for {path}. Pass --backend and --capabilities explicitly."
+        )
+    return chosen_backend, chosen_caps, inferred[2]
+
+
+def register(data: dict, key: str, path: Path, args, source: str) -> None:
+    backend, capabilities, fmt = infer_shape(path, args.backend, args.capabilities)
+    entry = {
+        "name": path.name,
+        "path": str(path),
+        "source": source,
+        "backend": backend,
+        "format": fmt,
+        "size_bytes": tree_size(path),
+        "capabilities": capabilities,
+        "role": args.role or "",
+        "verified": False,
+    }
+    data.setdefault("models", {})[key] = entry
+    if args.alias:
+        data.setdefault("aliases", {})[args.alias] = key
+    if args.default or not data.get("default"):
+        data["default"] = key
+    write_registry(data)
+    print(f"registered: {key} ({backend}, {','.join(capabilities)}, {human_size(entry['size_bytes'])})")
+    print(f"path: {path}")
+    print("verify it with: local-model use " + key)
+
+
+def cmd_pull(args) -> None:
+    try:
+        from huggingface_hub import hf_hub_download, snapshot_download
+    except ImportError:
+        raise SystemExit("huggingface_hub is required: python3 -m pip install huggingface_hub")
+
+    data = registry() if registry_path().exists() else {"version": 1, "default": None, "server": {"base_url": "http://127.0.0.1:8080", "api": "mlx-vlm"}, "aliases": {}, "models": {}}
+    key = args.name or args.repo_id.rsplit("/", 1)[-1]
+    if key in data.get("models", {}) and not args.force:
+        raise SystemExit(f"'{key}' is already registered. Use --force to re-pull or --name for a new id.")
+
+    if args.file:
+        target_dir = models_home() / "gguf"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        print(f"pulling {args.repo_id} :: {args.file} -> {target_dir}")
+        local = hf_hub_download(repo_id=args.repo_id, filename=args.file, local_dir=str(target_dir))
+        path = Path(local)
+    else:
+        target = models_home() / key
+        print(f"pulling {args.repo_id} -> {target}")
+        snapshot_download(repo_id=args.repo_id, local_dir=str(target))
+        path = target
+
+    register(data, key, path, args, source=args.repo_id)
+
+
+def cmd_add(args) -> None:
+    path = Path(args.path).expanduser().resolve()
+    if not path.exists():
+        raise SystemExit(f"No such path: {path}")
+    data = registry()
+    key = args.name or path.stem
+    if key in data.get("models", {}) and not args.force:
+        raise SystemExit(f"'{key}' is already registered. Use --force to replace or --name for a new id.")
+    register(data, key, path, args, source=str(path))
+
+
+def cmd_rm(args) -> None:
+    data = registry()
+    if args.model not in data.get("models", {}):
+        raise SystemExit(f"'{args.model}' is not registered (rm takes the model id, not an alias)")
+    entry = data["models"].pop(args.model)
+    data["aliases"] = {a: t for a, t in data.get("aliases", {}).items() if t != args.model}
+    if data.get("default") == args.model:
+        data["default"] = next(iter(data["models"]), None)
+    write_registry(data)
+    print(f"unregistered: {args.model}")
+    if args.purge:
+        path = Path(entry["path"]).expanduser()
+        if models_home() in path.parents or path == models_home():
+            if path.is_dir():
+                shutil.rmtree(path)
+            elif path.is_file():
+                path.unlink()
+            print(f"purged: {path}")
+        else:
+            print(f"NOT purged (outside {models_home()}): {path}", file=sys.stderr)
+
+
+# -- parser ----------------------------------------------------------------
+
+
+def add_register_flags(cmd) -> None:
+    cmd.add_argument("--name", help="registry id (default: derived from the source)")
+    cmd.add_argument("--alias", help="also register this alias")
+    cmd.add_argument("--backend", help="override the inferred backend")
+    cmd.add_argument("--capabilities", help="comma-separated, overrides inference (e.g. vision,text)")
+    cmd.add_argument("--role", help="one-line description of what this model is for")
+    cmd.add_argument("--default", action="store_true", help="make this the default model")
+    cmd.add_argument("--force", action="store_true")
+
+
+def parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description="Call and manage local models")
+    sub = p.add_subparsers(dest="command", required=True)
+
+    ls = sub.add_parser("list", help="list registered models")
+    ls.add_argument("-v", "--verbose", action="store_true")
+    ls.set_defaults(func=cmd_list)
+
+    status = sub.add_parser("status", help="show server status")
+    status.set_defaults(func=cmd_status)
+
+    path = sub.add_parser("path", help="print a model path")
+    path.add_argument("model", nargs="?", default="default")
+    path.set_defaults(func=cmd_path)
+
+    ask = sub.add_parser("ask", help="send a text prompt")
+    ask.add_argument("prompt")
+    ask.add_argument("--model", default="default")
+    ask.add_argument("--max-tokens", type=int, default=256)
+    ask.add_argument("--timeout", type=int, default=180)
+    ask.set_defaults(func=cmd_ask)
+
+    vision = sub.add_parser("vision", help="analyze an image")
+    vision.add_argument("image")
+    vision.add_argument("prompt", nargs="?", default="Describe this image accurately and concisely.")
+    vision.add_argument("--model", default="default")
+    vision.add_argument("--max-tokens", type=int, default=512)
+    vision.add_argument("--timeout", type=int, default=180)
+    vision.set_defaults(func=cmd_vision)
+
+    use = sub.add_parser("use", help="load and warm a model")
+    use.add_argument("model", nargs="?", default="default")
+    use.add_argument("--timeout", type=int, default=180)
+    use.set_defaults(func=cmd_use)
+
+    unload = sub.add_parser("unload", help="unload the active model")
+    unload.set_defaults(func=cmd_unload)
+
+    bench = sub.add_parser("benchmark", help="run all vision models on the same image")
+    bench.add_argument("image", nargs="?")
+    bench.add_argument("--prompt")
+    bench.add_argument("--max-tokens", type=int, default=80)
+    bench.add_argument("--timeout", type=int, default=180)
+    bench.set_defaults(func=cmd_benchmark)
+
+    pull = sub.add_parser("pull", help="download a model from Hugging Face and register it")
+    pull.add_argument("repo_id", help="e.g. mlx-community/Qwen3-VL-2B-Instruct-4bit")
+    pull.add_argument("--file", help="single file to fetch (GGUF), instead of the whole snapshot")
+    add_register_flags(pull)
+    pull.set_defaults(func=cmd_pull)
+
+    add = sub.add_parser("add", help="register a model already on disk (any source)")
+    add.add_argument("path")
+    add_register_flags(add)
+    add.set_defaults(func=cmd_add)
+
+    rm = sub.add_parser("rm", help="unregister a model (--purge also deletes its files)")
+    rm.add_argument("model")
+    rm.add_argument("--purge", action="store_true")
+    rm.set_defaults(func=cmd_rm)
+    return p
+
+
+def main() -> None:
+    args = parser().parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

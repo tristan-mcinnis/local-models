@@ -1,0 +1,25 @@
+# weights and model artifacts never enter git
+*.gguf
+*.safetensors
+*.mlx
+*.onnx
+*.npz
+
+# local state
+.env
+__pycache__/
+*.pyc
+.DS_Store
+models.json.bak
+
+# swift build products
+.build/
+*.xcodeproj
+
+# build/process ledgers (unlazy)
+GATES.md
+.unlazy/
+.unlazy-hook-state.json
+
+# private scan tokens, never committed
+.scrub-private

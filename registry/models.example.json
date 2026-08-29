@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "default": "qwen3-vl",
+  "server": {
+    "base_url": "http://127.0.0.1:8080",
+    "api": "mlx-vlm"
+  },
+  "daemon": {
+    "base_url": "http://127.0.0.1:8078"
+  },
+  "aliases": {
+    "default": "qwen3-vl",
+    "fast-vision": "qwen3-vl"
+  },
+  "models": {
+    "qwen3-vl": {
+      "name": "Qwen3-VL-2B-Instruct-4bit",
+      "path": "~/Models/Qwen3-VL-2B-Instruct-4bit",
+      "source": "mlx-community/Qwen3-VL-2B-Instruct-4bit",
+      "backend": "mlx-vlm",
+      "format": "MLX",
+      "quantization_bits": 4,
+      "parameters": "2B",
+      "size_bytes": 1798021605,
+      "capabilities": ["text", "image", "vision"],
+      "role": "default fast local vision",
+      "verified": false
+    },
+    "gemma-completion": {
+      "name": "gemma-4-E2B-i1-Q4_K_M.gguf",
+      "path": "~/Models/gguf/gemma-4-E2B-i1-Q4_K_M.gguf",
+      "source": "example: pull with --file to fetch one GGUF",
+      "backend": "llama-gguf",
+      "format": "GGUF",
+      "quantization_bits": 4,
+      "size_bytes": 0,
+      "capabilities": ["completion"],
+      "role": "example completion entry (phase 2 backend)",
+      "verified": false
+    }
+  }
+}

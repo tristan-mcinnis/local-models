@@ -1,0 +1,301 @@
+#!/usr/bin/env python3
+"""Privacy-first local image analysis and schema-validated extraction."""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import mimetypes
+import os
+import re
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+import jsonschema
+
+ROOT = Path(os.environ.get("LOCAL_MODELS_HOME", str(Path.home() / "Models"))).expanduser()
+REGISTRY = ROOT / "models.json"
+
+
+def load_registry() -> dict:
+    try:
+        return json.loads(REGISTRY.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"Cannot read {REGISTRY}: {exc}")
+
+
+def resolve_model(data: dict, name: str) -> tuple[str, dict]:
+    key = data.get("aliases", {}).get(name, name)
+    model = data.get("models", {}).get(key)
+    if model is None:
+        raise SystemExit(f"Unknown model '{name}'")
+    if not Path(model["path"]).expanduser().is_dir():
+        raise SystemExit(f"Model directory is missing: {model['path']}")
+    return key, model
+
+
+def image_part(path: Path) -> dict:
+    if not path.is_file():
+        raise SystemExit(f"Image not found: {path}")
+    mime = mimetypes.guess_type(path.name)[0] or "image/png"
+    encoded = base64.b64encode(path.read_bytes()).decode()
+    return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}}
+
+
+def call_server(data: dict, model: dict, messages: list[dict], max_tokens: int, timeout: int) -> str:
+    url = data["server"]["base_url"].rstrip("/") + "/chat/completions"
+    payload = {
+        "model": str(Path(model["path"]).expanduser()),
+        "temperature": 0,
+        "max_tokens": max_tokens,
+        "stream": False,
+        "messages": messages,
+    }
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode(),
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            result = json.load(response)
+        return result["choices"][0]["message"]["content"].strip()
+    except urllib.error.HTTPError as exc:
+        raise SystemExit(f"Local model server HTTP {exc.code}: {exc.read().decode(errors='replace')}")
+    except (OSError, KeyError, IndexError, TypeError) as exc:
+        raise SystemExit(f"Local image analysis failed: {exc}")
+
+
+def apple_vision_ocr(image: Path) -> dict:
+    try:
+        import Vision
+        from Foundation import NSURL
+        from Quartz import CGImageSourceCreateImageAtIndex, CGImageSourceCreateWithURL
+
+        source = CGImageSourceCreateWithURL(NSURL.fileURLWithPath_(str(image)), None)
+        cg_image = CGImageSourceCreateImageAtIndex(source, 0, None) if source else None
+        if cg_image is None:
+            raise ValueError("Apple Vision could not decode the image")
+        request = Vision.VNRecognizeTextRequest.alloc().init()
+        request.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
+        request.setUsesLanguageCorrection_(True)
+        handler = Vision.VNImageRequestHandler.alloc().initWithCGImage_options_(cg_image, {})
+        ok, error = handler.performRequests_error_([request], None)
+        if not ok:
+            raise RuntimeError(str(error))
+        lines = []
+        for observation in request.results() or []:
+            candidates = observation.topCandidates_(1)
+            if not candidates:
+                continue
+            candidate = candidates[0]
+            box = observation.boundingBox()
+            lines.append(
+                {
+                    "text": str(candidate.string()),
+                    "confidence": round(float(candidate.confidence()), 4),
+                    "box": {
+                        "x": round(float(box.origin.x), 5),
+                        "y": round(1.0 - float(box.origin.y + box.size.height), 5),
+                        "width": round(float(box.size.width), 5),
+                        "height": round(float(box.size.height), 5),
+                    },
+                    "_sort_y": float(box.origin.y),
+                }
+            )
+        lines.sort(key=lambda line: (-line.pop("_sort_y"), line["box"]["x"]))
+        return {"engine": "apple-vision", "text": "\n".join(line["text"] for line in lines), "lines": lines}
+    except Exception as exc:
+        raise RuntimeError(f"Apple Vision OCR failed: {exc}") from exc
+
+
+def tesseract_ocr(image: Path, psm: int = 6) -> dict:
+    try:
+        result = subprocess.run(
+            ["tesseract", str(image), "stdout", "--psm", str(psm)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"Tesseract OCR failed: {exc}") from exc
+    if result.returncode:
+        raise RuntimeError(f"Tesseract OCR failed: {result.stderr.strip()}")
+    return {"engine": "tesseract", "text": result.stdout.strip(), "lines": []}
+
+
+def run_ocr(image: Path, psm: int = 6, engine: str = "auto") -> dict:
+    if not image.is_file():
+        raise SystemExit(f"Image not found: {image}")
+    if engine in ("auto", "apple"):
+        try:
+            return apple_vision_ocr(image)
+        except RuntimeError as exc:
+            if engine == "apple":
+                raise SystemExit(str(exc))
+            print(f"{exc}; falling back to Tesseract", file=sys.stderr)
+    try:
+        return tesseract_ocr(image, psm)
+    except RuntimeError as exc:
+        raise SystemExit(str(exc))
+
+
+def parse_json_object(text: str):
+    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.IGNORECASE | re.DOTALL).strip()
+    decoder = json.JSONDecoder()
+    starts = [i for i, char in enumerate(cleaned) if char in "{["]
+    for start in starts:
+        try:
+            value, _ = decoder.raw_decode(cleaned[start:])
+            return value
+        except json.JSONDecodeError:
+            continue
+    raise ValueError("response did not contain valid JSON")
+
+
+def cmd_ocr(args) -> None:
+    result = run_ocr(Path(args.image).expanduser(), args.psm, args.engine)
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print(result["text"])
+
+
+def analyze(args, prompt: str) -> None:
+    data = load_registry()
+    _, model = resolve_model(data, args.model)
+    image = Path(args.image).expanduser()
+    messages = [{"role": "user", "content": [image_part(image), {"type": "text", "text": prompt}]}]
+    print(call_server(data, model, messages, args.max_tokens, args.timeout))
+
+
+def cmd_describe(args) -> None:
+    prompt = args.instructions or "Describe this image accurately and concisely. Include visible text when relevant."
+    analyze(args, prompt)
+
+
+def cmd_ui(args) -> None:
+    extra = f"\nAdditional instructions: {args.instructions}" if args.instructions else ""
+    analyze(
+        args,
+        "Analyze this user interface screenshot. Return structured Markdown covering: page purpose, "
+        "layout and spatial relationships, visible components and controls, exact visible text, current "
+        "state, and likely usability or accessibility issues. Distinguish observations from guesses." + extra,
+    )
+
+
+def cmd_extract(args) -> None:
+    image = Path(args.image).expanduser()
+    try:
+        schema = json.loads(Path(args.schema).expanduser().read_text())
+        jsonschema.validators.validator_for(schema).check_schema(schema)
+    except (OSError, json.JSONDecodeError, jsonschema.SchemaError) as exc:
+        raise SystemExit(f"Invalid schema: {exc}")
+
+    ocr = None
+    if not args.no_ocr:
+        ocr = run_ocr(image, args.psm, args.ocr_engine)
+    instructions = args.instructions or "Extract only facts visible in the image. Use null when a value is absent or unreadable."
+    prompt = (
+        "Extract structured data from this image. Return only valid JSON with no Markdown or commentary. "
+        "The result must satisfy the supplied JSON Schema exactly. Do not invent values.\n\n"
+        f"Instructions:\n{instructions}\n\nJSON Schema:\n{json.dumps(schema, ensure_ascii=False)}"
+    )
+    if ocr and ocr["text"]:
+        prompt += f"\n\nOCR evidence from {ocr['engine']} (may contain errors; verify against the image):\n{ocr['text'][:16000]}"
+
+    data = load_registry()
+    key, model = resolve_model(data, args.model)
+    content = [image_part(image), {"type": "text", "text": prompt}]
+    messages = [{"role": "user", "content": content}]
+    last_text = ""
+    last_error = ""
+
+    for attempt in range(args.retries + 1):
+        last_text = call_server(data, model, messages, args.max_tokens, args.timeout)
+        try:
+            value = parse_json_object(last_text)
+            jsonschema.validate(value, schema)
+            if args.envelope:
+                output = {
+                    "success": True,
+                    "model": key,
+                    "ocr_engine": ocr["engine"] if ocr else None,
+                    "data": value,
+                }
+            else:
+                output = value
+            print(json.dumps(output, ensure_ascii=False, indent=2))
+            return
+        except (ValueError, jsonschema.ValidationError) as exc:
+            last_error = str(exc)
+            if attempt < args.retries:
+                messages = [
+                    {"role": "user", "content": content},
+                    {"role": "assistant", "content": last_text},
+                    {
+                        "role": "user",
+                        "content": "The JSON was invalid. Correct it and return JSON only. Validation error: " + last_error,
+                    },
+                ]
+
+    print(f"Structured extraction failed validation: {last_error}", file=sys.stderr)
+    if args.show_invalid:
+        print(last_text, file=sys.stderr)
+    raise SystemExit(2)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description="Local image analysis and structured extraction")
+    sub = p.add_subparsers(dest="command", required=True)
+
+    ocr = sub.add_parser("ocr", help="extract text with Apple Vision or Tesseract")
+    ocr.add_argument("image")
+    ocr.add_argument("--engine", choices=("auto", "apple", "tesseract"), default="auto")
+    ocr.add_argument("--psm", type=int, default=6, help="Tesseract page segmentation mode")
+    ocr.add_argument("--json", action="store_true", help="include confidence and normalized boxes when available")
+    ocr.set_defaults(func=cmd_ocr)
+
+    for name, help_text, func in (
+        ("describe", "describe an image with the local VLM", cmd_describe),
+        ("ui", "analyze a UI screenshot", cmd_ui),
+    ):
+        command = sub.add_parser(name, help=help_text)
+        command.add_argument("image")
+        command.add_argument("instructions", nargs="?")
+        command.add_argument("--model", default="default")
+        command.add_argument("--max-tokens", type=int, default=700)
+        command.add_argument("--timeout", type=int, default=180)
+        command.set_defaults(func=func)
+
+    extract = sub.add_parser("extract", help="extract schema-validated JSON")
+    extract.add_argument("image")
+    extract.add_argument("--schema", required=True)
+    extract.add_argument("--instructions")
+    extract.add_argument("--model", default="default")
+    extract.add_argument("--max-tokens", type=int, default=1200)
+    extract.add_argument("--timeout", type=int, default=180)
+    extract.add_argument("--retries", type=int, default=1)
+    extract.add_argument("--no-ocr", action="store_true")
+    extract.add_argument("--ocr-engine", choices=("auto", "apple", "tesseract"), default="auto")
+    extract.add_argument("--psm", type=int, default=6, help="Tesseract page segmentation mode")
+    extract.add_argument("--envelope", action="store_true")
+    extract.add_argument("--show-invalid", action="store_true")
+    extract.set_defaults(func=cmd_extract)
+    return p
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
