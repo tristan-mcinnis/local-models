@@ -2,7 +2,7 @@ REPO := $(shell pwd)
 BIN  := $(HOME)/.local/bin
 PYTHON := $(shell which python3)
 
-.PHONY: install install-server uninstall status restart logs test
+.PHONY: install install-server menubar install-menubar uninstall status restart logs test
 
 ## Symlink the CLIs onto PATH and seed the registry if none exists.
 install:
@@ -23,10 +23,26 @@ install-server:
 	launchctl load $(HOME)/Library/LaunchAgents/com.local-models.server.plist
 	@echo "loaded: com.local-models.server (port 8078)"
 
+## Build the menu-bar app bundle into dist/.
+menubar:
+	cd menubar/LocalModelsBar && swift build -c release
+	rm -rf "dist/Local Models.app"
+	mkdir -p "dist/Local Models.app/Contents/MacOS"
+	cp menubar/LocalModelsBar/.build/release/LocalModelsBar "dist/Local Models.app/Contents/MacOS/"
+	cp menubar/LocalModelsBar/Info.plist "dist/Local Models.app/Contents/Info.plist"
+	@echo "built: dist/Local Models.app"
+
+## Copy the menu-bar app to /Applications and launch it.
+install-menubar: menubar
+	rm -rf "/Applications/Local Models.app"
+	cp -R "dist/Local Models.app" "/Applications/Local Models.app"
+	open "/Applications/Local Models.app"
+
 uninstall:
 	rm -f $(BIN)/local-model $(BIN)/local-image
 	launchctl unload $(HOME)/Library/LaunchAgents/com.local-models.server.plist 2>/dev/null || true
 	rm -f $(HOME)/Library/LaunchAgents/com.local-models.server.plist
+	rm -rf "/Applications/Local Models.app"
 
 status:
 	@curl -s -m 3 http://127.0.0.1:8078/health || echo "daemon not running (make install-server)"

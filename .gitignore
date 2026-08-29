@@ -15,6 +15,7 @@ models.json.bak
 # swift build products
 .build/
 *.xcodeproj
+dist/
 
 # build/process ledgers (unlazy)
 GATES.md

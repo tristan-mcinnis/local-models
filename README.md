@@ -105,6 +105,16 @@ the registry. TTS, embeddings, and reranking are the obvious next files. See
 A minimal Swift client for native apps ships in
 [client/swift/LocalModelClient](client/swift/LocalModelClient).
 
+## Menu bar
+
+A tiny menu-bar app shows the fleet at a glance: every registered model, a
+filled dot on the warm one, click to load, one item to unload and free the
+RAM. It talks only to the daemon.
+
+```bash
+make install-menubar   # builds dist/Local Models.app, copies to /Applications, launches
+```
+
 ## Design rules
 
 - **Local socket only.** The daemon binds 127.0.0.1. Nothing listens on the network.

@@ -8,6 +8,7 @@ pluggable backends, and reports which models are warm.
   GET  /v1/models       registry with live warm/loaded state
   POST /v1/vision       {"model"?, "prompt", "image_b64"|"image_path", "max_tokens"?}
   POST /v1/ask          {"model"?, "prompt", "max_tokens"?}
+  POST /v1/warm         {"model"?} — load a model and keep it warm
   POST /v1/complete     completion (phase 2 -> 501)
   POST /v1/transcribe   transcription (phase 2 -> 501)
   POST /v1/unload       unload the active model of the default backend
@@ -144,6 +145,11 @@ class Handler(BaseHTTPRequestHandler):
                 messages = [{"role": "user", "content": payload["prompt"]}]
                 result = self._infer(model, {**payload, "messages": messages})
                 self._send(200, {"model": key, "text": result["text"]})
+            elif self.path == "/v1/warm":
+                key, model = resolve_model(self.registry, payload.get("model"))
+                messages = [{"role": "user", "content": "Reply with OK only."}]
+                result = self._infer(model, {**payload, "messages": messages, "max_tokens": 8})
+                self._send(200, {"model": key, "warmed": True, "text": result["text"]})
             elif self.path in ("/v1/complete", "/v1/transcribe"):
                 capability = self.path.rsplit("/", 1)[-1]
                 self._send(

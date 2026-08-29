@@ -185,6 +185,15 @@ class DaemonRoutingTests(unittest.TestCase):
         status, _ = self.http("POST", "/v1/ask", {"prompt": "hi", "model": "ghost"})
         self.assertEqual(status, 400)
 
+    def test_warm_unknown_model_400(self):
+        status, _ = self.http("POST", "/v1/warm", {"model": "ghost"})
+        self.assertEqual(status, 400)
+
+    def test_warm_unreachable_backend_502(self):
+        status, data = self.http("POST", "/v1/warm", {"model": "fake"})
+        self.assertEqual(status, 502)
+        self.assertIn("unavailable", data["error"])
+
 
 if __name__ == "__main__":
     unittest.main()
