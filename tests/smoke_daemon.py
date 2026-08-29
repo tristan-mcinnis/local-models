@@ -66,13 +66,22 @@ def main() -> None:
             assert models["models"][0]["id"] == "fake", models
 
             request = urllib.request.Request(
+                base + "/v1/transcribe", data=b"{}", method="POST", headers={"Content-Type": "application/json"}
+            )
+            try:
+                urllib.request.urlopen(request, timeout=5)
+                raise AssertionError("/v1/transcribe should be 501")
+            except urllib.error.HTTPError as exc:
+                assert exc.code == 501, exc.code
+
+            request = urllib.request.Request(
                 base + "/v1/complete", data=b"{}", method="POST", headers={"Content-Type": "application/json"}
             )
             try:
                 urllib.request.urlopen(request, timeout=5)
-                raise AssertionError("/v1/complete should be 501")
+                raise AssertionError("/v1/complete without prompt should be 400")
             except urllib.error.HTTPError as exc:
-                assert exc.code == 501, exc.code
+                assert exc.code == 400, exc.code
 
             print("DAEMON_SMOKE_OK")
         finally:

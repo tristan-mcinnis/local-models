@@ -94,9 +94,15 @@ curl -s localhost:8078/health | jq           # per-backend availability
 |---|---|
 | `POST /v1/vision` | serving (mlx-vlm backend) |
 | `POST /v1/ask` | serving |
+| `POST /v1/complete` | serving (llama-gguf backend: daemon-managed llama-server, ~57 ms warm first token) |
+| `POST /v1/warm`, `/v1/unload` | serving (per-model lifecycle) |
 | `GET /v1/models`, `/health` | serving |
-| `POST /v1/complete` | phase 2 (llama.cpp backend, keystroke-latency budget) |
 | `POST /v1/transcribe` | phase 2 (MLX speech models) |
+
+Completion apps stream straight from the managed llama-server (the `endpoint`
+field in `/v1/models`); the daemon is the control plane that spawns, warms,
+and stops it. Thinking is disabled at spawn (`enable_thinking: false`) so
+completion models return raw continuation tokens, never reasoning.
 
 Backends are plugins: subclass `Backend`, declare capabilities, add one line to
 the registry. TTS, embeddings, and reranking are the obvious next files. See

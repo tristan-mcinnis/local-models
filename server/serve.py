@@ -72,6 +72,15 @@ def image_content(payload: dict, prompt: str) -> list[dict]:
 
 class Handler(BaseHTTPRequestHandler):
     registry: dict = {}
+    # One backend instance per name for the daemon's lifetime, so backends that
+    # own child processes (llama-server) keep them across requests.
+    backend_cache: dict = {}
+
+    @classmethod
+    def backend(cls, name: str):
+        if name not in cls.backend_cache:
+            cls.backend_cache[name] = get_backend(name, cls.registry)
+        return cls.backend_cache[name]
 
     # -- plumbing ----------------------------------------------------------
     def log_message(self, fmt, *args):  # quiet by default; launchd captures stderr
@@ -99,8 +108,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
             backends = {}
-            for name, cls in all_backends().items():
-                backends[name] = cls(self.registry).status()
+            for name in all_backends():
+                try:
+                    backends[name] = self.backend(name).status()
+                except BackendError as exc:
+                    backends[name] = {"available": False, "loaded_model": None, "detail": str(exc)}
             self._send(200, {"status": "ok", "service": "local-models", "backends": backends})
         elif self.path == "/v1/models":
             out = []
@@ -109,11 +121,16 @@ class Handler(BaseHTTPRequestHandler):
                 backend_name = model.get("backend", "mlx-vlm")
                 if backend_name not in status_cache:
                     try:
-                        status_cache[backend_name] = get_backend(backend_name, self.registry).status()
+                        status_cache[backend_name] = self.backend(backend_name).status()
                     except BackendError as exc:
                         status_cache[backend_name] = {"available": False, "loaded_model": None, "detail": str(exc)}
                 status = status_cache[backend_name]
                 resolved_path = str(Path(model.get("path", "")).expanduser())
+                endpoint = None
+                if backend_name == "mlx-vlm":
+                    endpoint = self.registry.get("server", {}).get("base_url")
+                elif backend_name == "llama-gguf":
+                    endpoint = self.registry.get("completion_server", {}).get("base_url", "http://127.0.0.1:8079")
                 out.append(
                     {
                         "id": key,
@@ -122,6 +139,7 @@ class Handler(BaseHTTPRequestHandler):
                         "path": resolved_path,
                         "warm": status.get("loaded_model") == resolved_path,
                         "backend_available": status.get("available", False),
+                        "endpoint": endpoint,
                     }
                 )
             self._send(200, {"default": self.registry.get("default"), "models": out})
@@ -147,21 +165,35 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, {"model": key, "text": result["text"]})
             elif self.path == "/v1/warm":
                 key, model = resolve_model(self.registry, payload.get("model"))
-                messages = [{"role": "user", "content": "Reply with OK only."}]
-                result = self._infer(model, {**payload, "messages": messages, "max_tokens": 8})
+                backend = self.backend(model.get("backend", "mlx-vlm"))
+                result = backend.warm(model, payload)
                 self._send(200, {"model": key, "warmed": True, "text": result["text"]})
-            elif self.path in ("/v1/complete", "/v1/transcribe"):
-                capability = self.path.rsplit("/", 1)[-1]
+            elif self.path == "/v1/complete":
+                key, model = resolve_model(self.registry, payload.get("model"))
+                if not payload.get("prompt"):
+                    raise ValueError("prompt is required")
+                system = payload.get(
+                    "system",
+                    "Continue the user's text naturally and concisely. "
+                    "Return only the continuation; do not repeat the input.",
+                )
+                messages = [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": payload["prompt"]},
+                ]
+                result = self._infer(model, {**payload, "messages": messages})
+                self._send(200, {"model": key, "text": result["text"]})
+            elif self.path == "/v1/transcribe":
                 self._send(
                     501,
                     {
-                        "error": f"{capability} is planned but not served yet (phase 2)",
+                        "error": "transcribe is planned but not served yet (phase 2)",
                         "hint": "see docs/layer-contract.md",
                     },
                 )
             elif self.path == "/v1/unload":
                 _, model = resolve_model(self.registry, payload.get("model"))
-                backend = get_backend(model.get("backend", "mlx-vlm"), self.registry)
+                backend = self.backend(model.get("backend", "mlx-vlm"))
                 self._send(200, backend.unload())
             else:
                 self._send(404, {"error": f"no route {self.path}"})
@@ -173,8 +205,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(502, {"error": str(exc)})
 
     def _infer(self, model: dict, payload: dict) -> dict:
-        backend = get_backend(model.get("backend", "mlx-vlm"), self.registry)
-        return backend.infer(model, payload)
+        return self.backend(model.get("backend", "mlx-vlm")).infer(model, payload)
 
 
 def main() -> None:

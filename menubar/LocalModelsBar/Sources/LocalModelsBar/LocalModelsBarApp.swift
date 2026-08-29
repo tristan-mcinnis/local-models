@@ -59,8 +59,10 @@ final class DaemonState: ObservableObject {
         busy = nil
     }
 
-    func unload() async {
-        await post("v1/unload", body: [:], timeout: 30)
+    func unload(_ id: String) async {
+        busy = id
+        await post("v1/unload", body: ["model": id], timeout: 30)
+        busy = nil
     }
 
     func startDaemon() {
@@ -108,8 +110,13 @@ struct LocalModelsBarApp: App {
                     .disabled(!model.backendAvailable || state.busy != nil)
                 }
                 Divider()
-                Button("Unload active model") { Task { await state.unload() } }
-                    .disabled(state.warmCount == 0 || state.busy != nil)
+                ForEach(state.models.filter(\.warm)) { model in
+                    Button("Unload \(model.id)") { Task { await state.unload(model.id) } }
+                        .disabled(state.busy != nil)
+                }
+                if state.warmCount == 0 {
+                    Text("Nothing to unload")
+                }
             } else {
                 Text("Daemon: not running")
                 Button("Start daemon") { state.startDaemon() }

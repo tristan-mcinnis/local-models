@@ -36,6 +36,13 @@ class Backend:
         """Serve one request for a model this backend owns. Returns a JSON-able dict."""
         raise NotSupported(f"backend '{self.name}' cannot serve this request yet")
 
+    def warm(self, model: dict, payload: dict) -> dict:
+        """Load the model and leave it warm. Default: run one tiny inference."""
+        return self.infer(
+            model,
+            {**payload, "messages": [{"role": "user", "content": "Reply with OK only."}], "max_tokens": 8},
+        )
+
     def unload(self) -> dict:
         raise NotSupported(f"backend '{self.name}' has no unload")
 

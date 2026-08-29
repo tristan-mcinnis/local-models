@@ -166,11 +166,25 @@ class DaemonRoutingTests(unittest.TestCase):
         self.assertEqual(data["models"][0]["id"], "fake")
         self.assertIn("warm", data["models"][0])
 
-    def test_phase2_endpoints_501(self):
-        for path in ("/v1/complete", "/v1/transcribe"):
-            status, data = self.http("POST", path, {})
-            self.assertEqual(status, 501, path)
-            self.assertIn("planned", data["error"])
+    def test_transcribe_still_501(self):
+        status, data = self.http("POST", "/v1/transcribe", {})
+        self.assertEqual(status, 501)
+        self.assertIn("planned", data["error"])
+
+    def test_complete_requires_prompt(self):
+        status, data = self.http("POST", "/v1/complete", {})
+        self.assertEqual(status, 400)
+        self.assertIn("prompt", data["error"])
+
+    def test_complete_unreachable_backend_502(self):
+        status, _ = self.http("POST", "/v1/complete", {"model": "fake", "prompt": "hi"})
+        self.assertEqual(status, 502)
+
+    def test_llama_backend_reports_endpoint(self):
+        status, data = self.http("GET", "/v1/models")
+        self.assertEqual(status, 200)
+        by_id = {m["id"]: m for m in data["models"]}
+        self.assertTrue(by_id["fake"]["endpoint"].startswith("http://127.0.0.1"))
 
     def test_unknown_route_404(self):
         status, _ = self.http("GET", "/nope")

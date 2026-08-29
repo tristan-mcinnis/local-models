@@ -8,6 +8,9 @@
   "daemon": {
     "base_url": "http://127.0.0.1:8078"
   },
+  "completion_server": {
+    "base_url": "http://127.0.0.1:8079"
+  },
   "aliases": {
     "default": "qwen3-vl",
     "fast-vision": "qwen3-vl"

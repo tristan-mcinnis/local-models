@@ -26,9 +26,11 @@ One machine, many tiny models, one owner of their lifecycle.
    behind a flag first, in-process as fallback until trust is earned.
 
 Vision is at 3 (the mlx-vlm server predates this repo and was adopted).
-Completion and transcription are at 1 by design: the apps that own those
-models are under active development, and porting them waits until they
-stabilize.
+Completion reached 3 on 2026-08-29: the daemon manages a llama-server
+(spawn on warm, stop on unload, thinking disabled), and the first client
+app routes to it behind a user toggle with its in-process engine as the
+off-switch fallback. Transcription stays at 1 until the dictation app
+stabilizes.
 
 ## Latency budgets (what "serving" must mean)
 
