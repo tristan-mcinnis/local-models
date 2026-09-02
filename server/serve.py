@@ -13,6 +13,17 @@ pluggable backends, and reports which models are warm.
   POST /v1/unload       {"model"?}  unload the backend that owns that model
   POST /v1/transcribe   planned (501)
 
+OpenAI-compatible passthrough (for clients that speak OpenAI chat, e.g.
+Quick Launch's local provider), so no app needs a backend port:
+
+  GET  /v1/openai/models          {"object": "list", "data": [{"id", "object": "model", "owned_by"}]}
+  POST /v1/chat/completions       OpenAI chat body; "model" is a registry id or
+                                  alias (or omitted for the default). The daemon
+                                  readies the owning backend and relays the
+                                  backend's reply byte-for-byte, streaming
+                                  (SSE) or not. Unknown model is 404 here, as
+                                  OpenAI clients expect.
+
 Every success body is a JSON object. Every error body is
 {"error": "<message>"} with an optional "hint"; status codes are
 400 (bad request / unknown model), 404 (no route), 501 (planned, not
@@ -29,6 +40,8 @@ import json
 import mimetypes
 import os
 import sys
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -36,6 +49,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from backends import BackendError, NotSupported, all_backends, get_backend, status_dict  # noqa: E402
 from common import (  # noqa: E402
     DEFAULT_DAEMON_URL,
+    OPENER,
     RegistryError,
     backend_name,
     load_registry,
@@ -139,7 +153,13 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- GET ---------------------------------------------------------------
     def do_GET(self):
-        self._dispatch({"/health": self.get_health, "/v1/models": self.get_models})
+        self._dispatch(
+            {
+                "/health": self.get_health,
+                "/v1/models": self.get_models,
+                "/v1/openai/models": self.get_openai_models,
+            }
+        )
 
     def get_health(self) -> None:
         backends = {name: self.backend_status(name) for name in all_backends()}
@@ -171,10 +191,27 @@ class Handler(BaseHTTPRequestHandler):
             )
         self._send(200, {"default": self.registry.get("default"), "models": out})
 
+    def get_openai_models(self) -> None:
+        """OpenAI `GET /v1/models` shape: ids plus aliases of every model whose
+        backend can answer /v1/chat/completions (TTS / STT entries stay out)."""
+        models = {}
+        for key, model in self.registry.get("models", {}).items():
+            try:
+                if self.backend(backend_name(model)).chat_completions_path:
+                    models[key] = model
+            except BackendError:
+                continue
+        data = [{"id": key, "object": "model", "owned_by": "local-models"} for key in models]
+        for alias, target in self.registry.get("aliases", {}).items():
+            if alias not in models and target in models:
+                data.append({"id": alias, "object": "model", "owned_by": "local-models"})
+        self._send(200, {"object": "list", "data": data})
+
     # -- POST --------------------------------------------------------------
     def do_POST(self):
         self._dispatch(
             {
+                "/v1/chat/completions": self.post_chat_completions,
                 "/v1/vision": self.post_vision,
                 "/v1/ask": self.post_ask,
                 "/v1/complete": self.post_complete,
@@ -227,6 +264,50 @@ class Handler(BaseHTTPRequestHandler):
     def post_transcribe(self) -> None:
         self._payload()
         raise NotSupported("transcribe is planned but not served yet (phase 2)")
+
+    # -- OpenAI passthrough ---------------------------------------------------
+    def post_chat_completions(self) -> None:
+        payload = self._payload()
+        if not isinstance(payload.get("messages"), list) or not payload["messages"]:
+            raise ValueError("messages is required")
+        try:
+            key, model = resolve_model(self.registry, payload.get("model"))
+        except RegistryError as exc:
+            self._error(404, str(exc))
+            return
+        backend = self.backend(backend_name(model))
+        if backend.chat_completions_path is None or backend.base_url is None:
+            raise NotSupported(f"backend '{backend.name}' has no OpenAI chat endpoint")
+        backend.prepare(model)
+        # The backends key on the weight path, not the registry id.
+        body = json.dumps({**payload, "model": model_path(model)}).encode()
+        request = urllib.request.Request(
+            backend.base_url.rstrip("/") + backend.chat_completions_path,
+            data=body,
+            method="POST",
+            headers={"Content-Type": "application/json", "Accept": self.headers.get("Accept") or "*/*"},
+        )
+        timeout = float(payload.get("timeout") or 600)
+        try:
+            upstream = OPENER.open(request, timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            raise BackendError(f"{backend.name} HTTP {exc.code}: {exc.read().decode(errors='replace')}")
+        except OSError as exc:
+            raise BackendError(f"{backend.name} unavailable at {backend.base_url}: {exc}")
+        with upstream:
+            self.send_response(upstream.status)
+            self.send_header("Content-Type", upstream.headers.get("Content-Type", "application/json"))
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Local-Models-Model", key)
+            self.send_header("Connection", "close")
+            self.end_headers()
+            # Relay each chunk as it lands so SSE reaches the client live.
+            while True:
+                chunk = upstream.read1(65536)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                self.wfile.flush()
 
 
 def main() -> None:

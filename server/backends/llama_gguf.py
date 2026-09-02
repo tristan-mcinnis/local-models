@@ -26,6 +26,7 @@ DEFAULT_BASE_URL = "http://127.0.0.1:8079"
 class LlamaGgufBackend(Backend):
     name = "llama-gguf"
     capabilities = ("completion", "text")
+    chat_completions_path = "/v1/chat/completions"
 
     def __init__(self, registry: dict):
         super().__init__(registry)
@@ -116,6 +117,9 @@ class LlamaGgufBackend(Backend):
             )
             return status_dict(self.binary() is not None, None, detail)
         return status_dict(True, self.served_model_path(), "healthy")
+
+    def prepare(self, model: dict) -> None:
+        self.ensure(model)
 
     def warm(self, model: dict, payload: dict) -> dict:
         self.ensure(model)

@@ -35,6 +35,9 @@ class Backend:
     capabilities: tuple[str, ...] = ()
     #: Data-plane URL apps may stream from directly (None = daemon only).
     base_url: str | None = None
+    #: Path of the backend's OpenAI-compatible chat endpoint, relative to
+    #: base_url (None = the daemon cannot pass OpenAI requests through).
+    chat_completions_path: str | None = None
 
     def __init__(self, registry: dict):
         self.registry = registry
@@ -55,6 +58,10 @@ class Backend:
 
     def unload(self) -> dict:
         raise NotSupported(f"backend '{self.name}' has no unload")
+
+    def prepare(self, model: dict) -> None:
+        """Make the data plane ready to serve `model` (spawn / load as needed).
+        Raise BackendError when it cannot be. Default: nothing to do."""
 
 
 def all_backends() -> dict[str, type[Backend]]:

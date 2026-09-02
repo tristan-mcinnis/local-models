@@ -68,10 +68,13 @@ local-dictation) build on one contract.
 
 ## Left
 
-- Quick Launch still points its local provider at `http://127.0.0.1:8080`
-  (the raw mlx-vlm OpenAI-compatible port), not the daemon. That is a valid
-  data-plane use, but it is the one client that names a backend port; the
-  lead should decide whether it moves to `/v1/vision`.
+- Quick Launch pointed its local provider at `http://127.0.0.1:8080` (the raw
+  mlx-vlm OpenAI-compatible port). Resolved the same day: the daemon now has
+  an OpenAI passthrough (`POST /v1/chat/completions`, `GET /v1/openai/models`)
+  that resolves registry ids, readies the backend, and relays the stream
+  byte-for-byte, so Quick Launch can target `http://127.0.0.1:8078/v1` with
+  model id `qwen3-vl` (the registry default). Repointing Quick Launch is the
+  lead's change in that repo.
 - The vision server has two starters: the separate launchd agent
   `com.tristan.mlx-vlm-server` and the daemon's `--ensure-vision` spawn.
   Adopt-or-spawn is documented and works; it stays.

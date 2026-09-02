@@ -11,8 +11,9 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
-from http.server import ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -293,6 +294,173 @@ class CliThroughDaemonTests(unittest.TestCase):
         result = subprocess.run([sys.executable, str(CLI), "status"], capture_output=True, text=True, env=env, timeout=60)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("daemon is unavailable", result.stderr)
+
+
+SSE_CHUNKS = [
+    b'data: {"id":"c1","object":"chat.completion.chunk","choices":[{"delta":{"role":"assistant"}}]}\n\n',
+    b'data: {"id":"c1","object":"chat.completion.chunk","choices":[{"delta":{"content":"Hi"}}]}\n\n',
+    b'data: {"id":"c1","object":"chat.completion.chunk","choices":[{"delta":{"content":" there"}}]}\n\n',
+    b'data: {"id":"c1","object":"chat.completion.chunk","choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+    b"data: [DONE]\n\n",
+]
+
+
+class FakeOpenAIBackend(BaseHTTPRequestHandler):
+    """Stands in for mlx-vlm: /health, and /chat/completions streaming or not.
+
+    The last SSE chunk waits on `release` so a test can prove the daemon
+    relays chunks live instead of buffering the whole body."""
+
+    release = threading.Event()
+    requests: list = []
+
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        body = json.dumps({"status": "healthy", "loaded_model": None}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        type(self).requests.append((self.path, payload))
+        if payload.get("stream"):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            for chunk in SSE_CHUNKS[:-1]:
+                self.wfile.write(chunk)
+                self.wfile.flush()
+            type(self).release.wait(timeout=5)
+            self.wfile.write(SSE_CHUNKS[-1])
+            self.wfile.flush()
+            return
+        body = json.dumps(
+            {
+                "id": "c1",
+                "object": "chat.completion",
+                "model": payload["model"],
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "Hi there"}, "finish_reason": "stop"}],
+            }
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class OpenAIPassthroughTests(unittest.TestCase):
+    """POST /v1/chat/completions relays the backend's OpenAI reply byte-for-byte."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        home = make_home(Path(cls._tmp.name))
+        cls.fake = ThreadingHTTPServer(("127.0.0.1", 0), FakeOpenAIBackend)
+        threading.Thread(target=cls.fake.serve_forever, daemon=True).start()
+        registry = json.loads((home / "models.json").read_text())
+        registry["server"]["base_url"] = f"http://127.0.0.1:{cls.fake.server_address[1]}"
+        registry["aliases"]["vision"] = "fake"
+        registry["aliases"]["tts"] = "voice"
+        registry["models"]["voice"] = {"path": str(home / "voice"), "backend": "pocket-tts", "capabilities": ["tts"]}
+        serve.Handler.registry = registry
+        serve.Handler.backend_cache = {}
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), serve.Handler)
+        cls.port = cls.server.server_address[1]
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.fake.shutdown()
+        cls._tmp.cleanup()
+
+    def setUp(self):
+        FakeOpenAIBackend.release.set()
+        FakeOpenAIBackend.requests.clear()
+
+    def post(self, body: dict):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        conn.request("POST", "/v1/chat/completions", body=json.dumps(body), headers={"Content-Type": "application/json"})
+        return conn, conn.getresponse()
+
+    def test_streaming_relays_chunks_live_and_in_order(self):
+        FakeOpenAIBackend.release.clear()
+        conn, response = self.post({"model": "vision", "stream": True, "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(response.status, 200)
+        self.assertTrue(response.getheader("Content-Type").startswith("text/event-stream"))
+        self.assertEqual(response.getheader("X-Local-Models-Model"), "fake")
+        # The first four chunks must arrive while the fake is still holding the last one.
+        early = b""
+        deadline = time.monotonic() + 5
+        while len(early) < sum(len(c) for c in SSE_CHUNKS[:-1]) and time.monotonic() < deadline:
+            early += response.read1(65536)
+        self.assertEqual(early, b"".join(SSE_CHUNKS[:-1]))
+        FakeOpenAIBackend.release.set()
+        rest = response.read()
+        conn.close()
+        self.assertEqual(early + rest, b"".join(SSE_CHUNKS))
+        path, forwarded = FakeOpenAIBackend.requests[0]
+        self.assertEqual(path, "/chat/completions")
+        self.assertTrue(forwarded["model"].endswith("fake-model"))
+        self.assertTrue(forwarded["stream"])
+
+    def test_non_streaming_json_passthrough(self):
+        conn, response = self.post({"messages": [{"role": "user", "content": "hi"}]})
+        data = json.loads(response.read())
+        conn.close()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(data["object"], "chat.completion")
+        self.assertEqual(data["choices"][0]["message"]["content"], "Hi there")
+        self.assertEqual(FakeOpenAIBackend.requests[0][1]["messages"], [{"role": "user", "content": "hi"}])
+
+    def test_unknown_model_404(self):
+        conn, response = self.post({"model": "ghost", "messages": [{"role": "user", "content": "hi"}]})
+        data = json.loads(response.read())
+        conn.close()
+        self.assertEqual(response.status, 404)
+        self.assertIn("unknown model 'ghost'", data["error"])
+        self.assertEqual(FakeOpenAIBackend.requests, [])
+
+    def test_missing_messages_400(self):
+        conn, response = self.post({"model": "fake"})
+        data = json.loads(response.read())
+        conn.close()
+        self.assertEqual(response.status, 400)
+        self.assertIn("messages", data["error"])
+
+    def test_backend_down_502(self):
+        registry = dict(serve.Handler.registry)
+        registry["server"] = {"base_url": f"http://127.0.0.1:{closed_port()}"}
+        saved = serve.Handler.registry, serve.Handler.backend_cache
+        serve.Handler.registry, serve.Handler.backend_cache = registry, {}
+        try:
+            conn, response = self.post({"model": "fake", "messages": [{"role": "user", "content": "hi"}]})
+            data = json.loads(response.read())
+            conn.close()
+        finally:
+            serve.Handler.registry, serve.Handler.backend_cache = saved
+        self.assertEqual(response.status, 502)
+        self.assertIn("unavailable", data["error"])
+
+    def test_openai_model_list_shape(self):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        conn.request("GET", "/v1/openai/models")
+        response = conn.getresponse()
+        data = json.loads(response.read())
+        conn.close()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(data["object"], "list")
+        ids = {m["id"] for m in data["data"]}
+        self.assertEqual(ids, {"fake", "default", "vision"})
+        for entry in data["data"]:
+            self.assertEqual(entry["object"], "model")
 
 
 if __name__ == "__main__":

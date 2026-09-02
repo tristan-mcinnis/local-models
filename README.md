@@ -105,6 +105,16 @@ curl -s localhost:8078/health | jq           # per-backend availability
 | `POST /v1/warm` | `{model?}` | `{model, warmed, text}` | serving |
 | `POST /v1/unload` | `{model?}` | `{model, unloaded, message}` | serving |
 | `POST /v1/transcribe` | | | phase 2 (501) |
+| `GET /v1/openai/models` | | OpenAI list: `{object: "list", data: [{id, object: "model", owned_by}]}` (ids + aliases) | serving |
+| `POST /v1/chat/completions` | OpenAI chat body; `model` = registry id or alias (omit for default) | the backend's OpenAI reply relayed byte-for-byte, streaming (`text/event-stream`) or JSON; header `X-Local-Models-Model` carries the resolved id | serving (mlx-vlm and llama-gguf) |
+
+The two OpenAI-shaped routes are the passthrough for clients that already
+speak OpenAI chat (Quick Launch's local provider, any OpenAI SDK): point them
+at `http://127.0.0.1:8078/v1` and name a registry id as the model. The daemon
+resolves the id, readies the owning backend (spawning llama-server for a GGUF
+model; the mlx-vlm server must already be up), rewrites `model` to the weight
+path, and relays the backend's stream. Unknown model answers 404 there, as
+OpenAI clients expect; everything else keeps the error envelope below.
 
 Every error is `{"error": "<message>"}` plus an optional `"hint"`:
 400 bad request or unknown model, 404 no route, 501 planned but not served,

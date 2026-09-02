@@ -44,6 +44,12 @@ check `local-model status` before calling it done.
   table; every error is `{"error", "hint"?}` with 400/404/501/502. Changes
   must be additive; clients (Quick Launch, screenctx, cotype, local-dictation)
   depend on it.
+- OpenAI passthrough: `POST /v1/chat/completions` and `GET /v1/openai/models`
+  let OpenAI-shaped clients target the daemon instead of a backend port. The
+  daemon resolves the registry id, calls `backend.prepare(model)`, rewrites
+  `model` to the weight path, and relays the backend's reply byte-for-byte
+  (SSE or JSON). Each backend declares `chat_completions_path`. Unknown
+  model is 404 on that route only.
 - Backends report `{"available", "loaded_model", "detail"}` and unload to
   `{"message"}`. Raise `BackendError` (502) or `NotSupported` (501).
 - Planned capabilities refuse with 501. Never fake a result.

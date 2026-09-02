@@ -25,6 +25,7 @@ DEFAULT_BASE_URL = "http://127.0.0.1:8080"
 class MlxVlmBackend(Backend):
     name = "mlx-vlm"
     capabilities = ("vision", "text")
+    chat_completions_path = "/chat/completions"
 
     def __init__(self, registry: dict):
         super().__init__(registry)
@@ -61,6 +62,15 @@ class MlxVlmBackend(Backend):
         if health is None:
             return status_dict(False, None, f"no server at {self.base_url}")
         return status_dict(True, health.get("loaded_model"), health.get("status", "unknown"))
+
+    def prepare(self, model: dict) -> None:
+        # The mlx-vlm server loads whichever model path a request names, so
+        # being up is enough. Spawning belongs to launchd / --ensure-vision,
+        # not to a request that a client is waiting on.
+        if self.health() is None:
+            raise BackendError(
+                f"mlx-vlm server unavailable at {self.base_url}: start it (launchd agent or --ensure-vision)"
+            )
 
     def infer(self, model: dict, payload: dict) -> dict:
         """payload: {"messages": [...], "max_tokens": int, "temperature": float, "timeout": float}."""

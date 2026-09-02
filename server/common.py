@@ -71,7 +71,7 @@ def daemon_base_url(registry: dict | None = None) -> str:
 
 # Loopback traffic never goes through a system or environment proxy: a VPN
 # or proxy app on the Mac would otherwise answer for a backend that is down.
-_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 def http_json(base_url: str, path: str, payload: dict | None = None, timeout: float = 180):
@@ -88,7 +88,7 @@ def http_json(base_url: str, path: str, payload: dict | None = None, timeout: fl
         method="GET" if payload is None else "POST",
         headers={"Content-Type": "application/json"},
     )
-    with _OPENER.open(request, timeout=timeout) as response:
+    with OPENER.open(request, timeout=timeout) as response:
         return json.load(response)
 
 
