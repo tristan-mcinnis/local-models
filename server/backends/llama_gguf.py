@@ -13,26 +13,14 @@ import shutil
 import subprocess
 import time
 import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import Any
 
-from . import Backend, BackendError
+from common import http_json, model_path
+
+from . import Backend, BackendError, status_dict
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8079"
-
-
-def _request(base_url: str, path: str, payload: dict | None = None, timeout: int = 180):
-    url = base_url.rstrip("/") + path
-    body = None if payload is None else json.dumps(payload).encode()
-    req = urllib.request.Request(
-        url,
-        data=body,
-        method="GET" if payload is None else "POST",
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as response:
-        return json.load(response)
 
 
 class LlamaGgufBackend(Backend):
@@ -59,7 +47,7 @@ class LlamaGgufBackend(Backend):
 
     def health(self) -> bool:
         try:
-            _request(self.base_url, "/health", timeout=3)
+            http_json(self.base_url, "/health", timeout=3)
             return True
         except (OSError, urllib.error.URLError, json.JSONDecodeError):
             return False
@@ -67,7 +55,7 @@ class LlamaGgufBackend(Backend):
     def served_model_path(self) -> str | None:
         """The GGUF the running server actually has loaded, from /v1/models."""
         try:
-            result = _request(self.base_url, "/v1/models", timeout=3)
+            result = http_json(self.base_url, "/v1/models", timeout=3)
             model_id = result["data"][0]["id"]
             return str(Path(model_id).expanduser())
         except (OSError, urllib.error.URLError, json.JSONDecodeError, KeyError, IndexError):
@@ -75,7 +63,7 @@ class LlamaGgufBackend(Backend):
 
     def ensure(self, model: dict, wait_seconds: int = 180) -> None:
         """Make llama-server serve this model, respawning if a different one is up."""
-        target = str(Path(model["path"]).expanduser())
+        target = model_path(model)
         if self.health() and self.served_model_path() == target:
             return
         binary = self.binary()
@@ -126,15 +114,15 @@ class LlamaGgufBackend(Backend):
                 if self.binary()
                 else "llama-server not installed (brew install llama.cpp)"
             )
-            return {"available": self.binary() is not None, "loaded_model": None, "detail": detail}
-        return {"available": True, "loaded_model": self.served_model_path(), "detail": "healthy"}
+            return status_dict(self.binary() is not None, None, detail)
+        return status_dict(True, self.served_model_path(), "healthy")
 
     def warm(self, model: dict, payload: dict) -> dict:
         self.ensure(model)
         return self.infer(model, {**payload, "messages": [{"role": "user", "content": "Reply with OK only."}], "max_tokens": 8})
 
     def infer(self, model: dict, payload: dict) -> dict:
-        target = str(Path(model["path"]).expanduser())
+        target = model_path(model)
         if not self.health():
             raise BackendError(
                 f"llama-server unavailable at {self.base_url}: warm the model first (POST /v1/warm)"
@@ -152,7 +140,7 @@ class LlamaGgufBackend(Backend):
             "messages": payload["messages"],
         }
         try:
-            result = _request(self.base_url, "/v1/chat/completions", body, payload.get("timeout", 180))
+            result = http_json(self.base_url, "/v1/chat/completions", body, payload.get("timeout", 180))
         except urllib.error.HTTPError as exc:
             raise BackendError(f"llama-server HTTP {exc.code}: {exc.read().decode(errors='replace')}")
         except OSError as exc:

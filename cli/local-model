@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Manage and call local models: registry, server, pull from Hugging Face.
+"""Manage and call local models: registry, daemon, pull from Hugging Face.
 
 The registry lives at $LOCAL_MODELS_HOME/models.json (default ~/Models).
-Weights live beside it and never belong in git.
+Weights live beside it and never belong in git. Every model call goes
+through the local-models daemon (default http://127.0.0.1:8078); this CLI
+never talks to a backend server directly.
 """
 
 from __future__ import annotations
@@ -11,28 +13,30 @@ import argparse
 import base64
 import json
 import mimetypes
-import os
 import shutil
 import sys
 import time
 import urllib.error
-import urllib.request
 from pathlib import Path
 
-
-def models_home() -> Path:
-    return Path(os.environ.get("LOCAL_MODELS_HOME", str(Path.home() / "Models"))).expanduser()
-
-
-def registry_path() -> Path:
-    return models_home() / "models.json"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "server"))
+from common import (  # noqa: E402
+    RegistryError,
+    daemon_base_url,
+    http_error_detail,
+    http_json,
+    load_registry,
+    models_home,
+    registry_path,
+)
+from common import resolve_model as _resolve_model  # noqa: E402
 
 
 def registry() -> dict:
     try:
-        return json.loads(registry_path().read_text())
-    except (OSError, json.JSONDecodeError) as exc:
-        raise SystemExit(f"Cannot read {registry_path()}: {exc}")
+        return load_registry()
+    except RegistryError as exc:
+        raise SystemExit(str(exc))
 
 
 def write_registry(data: dict) -> None:
@@ -43,70 +47,41 @@ def write_registry(data: dict) -> None:
 
 
 def resolve(name: str, data: dict) -> tuple[str, dict]:
-    key = data.get("aliases", {}).get(name, name)
-    model = data.get("models", {}).get(key)
-    if not model:
-        choices = ", ".join(sorted(data.get("models", {})))
-        raise SystemExit(f"Unknown model '{name}'. Available: {choices}")
+    try:
+        key, model = _resolve_model(data, name)
+    except RegistryError as exc:
+        raise SystemExit(str(exc))
     path = Path(model["path"]).expanduser()
     if not path.exists():
         raise SystemExit(f"Model path is missing: {path}")
     return key, model
 
 
-def request(data: dict, path: str, payload: dict | None = None, timeout: int = 180):
-    url = data["server"]["base_url"].rstrip("/") + path
-    body = None if payload is None else json.dumps(payload).encode()
-    req = urllib.request.Request(
-        url,
-        data=body,
-        method="GET" if payload is None else "POST",
-        headers={"Content-Type": "application/json"},
-    )
+def model_arg(name: str | None) -> dict:
+    """The "model" field for a daemon request; "default" lets the daemon pick."""
+    return {} if not name or name == "default" else {"model": name}
+
+
+def daemon(data: dict, path: str, payload: dict | None = None, timeout: int = 180):
+    base = daemon_base_url(data)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            return json.load(response)
+        return http_json(base, path, payload, timeout)
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode(errors="replace")
-        raise SystemExit(f"Local model server returned HTTP {exc.code}: {detail}")
+        raise SystemExit(f"local-models daemon returned HTTP {exc.code}: {http_error_detail(exc)}")
     except OSError as exc:
         raise SystemExit(
-            f"Local model server is unavailable at {url}: {exc}\n"
-            "Check it with: local-model status"
+            f"local-models daemon is unavailable at {base}: {exc}\n"
+            "Start it with: make install-server (or make restart)"
         )
 
 
-def chat(data: dict, model: dict, content, max_tokens: int, timeout: int) -> dict:
-    return request(
-        data,
-        "/chat/completions",
-        {
-            "model": str(Path(model["path"]).expanduser()),
-            "temperature": 0,
-            "max_tokens": max_tokens,
-            "stream": False,
-            "messages": [{"role": "user", "content": content}],
-        },
-        timeout,
-    )
-
-
-def response_text(result: dict) -> str:
-    try:
-        return result["choices"][0]["message"]["content"].strip()
-    except (KeyError, IndexError, TypeError, AttributeError):
-        raise SystemExit("Unexpected server response:\n" + json.dumps(result, indent=2))
-
-
-def image_content(image: Path, prompt: str) -> list[dict]:
+def image_payload(image: Path) -> dict:
     if not image.is_file():
         raise SystemExit(f"Image not found: {image}")
-    mime = mimetypes.guess_type(image.name)[0] or "image/png"
-    encoded = base64.b64encode(image.read_bytes()).decode()
-    return [
-        {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}},
-        {"type": "text", "text": prompt},
-    ]
+    return {
+        "image_b64": base64.b64encode(image.read_bytes()).decode(),
+        "mime": mimetypes.guess_type(image.name)[0] or "image/png",
+    }
 
 
 def human_size(value: int) -> str:
@@ -143,16 +118,16 @@ def cmd_list(args) -> None:
 
 def cmd_status(_args) -> None:
     data = registry()
-    status = request(data, "/health", timeout=5)
-    loaded = status.get("loaded_model") or "none"
-    for key, model in data["models"].items():
-        if loaded == str(Path(model["path"]).expanduser()):
-            loaded = key
-            break
-    print(f"server: {status.get('status', 'unknown')}")
-    print(f"endpoint: {data['server']['base_url']}")
-    print(f"loaded: {loaded}")
-    print(f"default: {data.get('default')}")
+    health = daemon(data, "/health", timeout=5)
+    models = daemon(data, "/v1/models", timeout=10)
+    warm = [m["id"] for m in models.get("models", []) if m.get("warm")]
+    print(f"server: {health.get('status', 'unknown')}")
+    print(f"endpoint: {daemon_base_url(data)}")
+    print(f"loaded: {', '.join(warm) or 'none'}")
+    print(f"default: {models.get('default')}")
+    for name, status in health.get("backends", {}).items():
+        state = "available" if status.get("available") else "unavailable"
+        print(f"backend {name}: {state} ({status.get('detail', '')})")
 
 
 def cmd_path(args) -> None:
@@ -163,28 +138,32 @@ def cmd_path(args) -> None:
 
 def cmd_ask(args) -> None:
     data = registry()
-    _, model = resolve(args.model, data)
-    print(response_text(chat(data, model, args.prompt, args.max_tokens, args.timeout)))
+    payload = {**model_arg(args.model), "prompt": args.prompt, "max_tokens": args.max_tokens, "timeout": args.timeout}
+    print(daemon(data, "/v1/ask", payload, args.timeout)["text"])
 
 
 def cmd_vision(args) -> None:
     data = registry()
-    _, model = resolve(args.model, data)
-    content = image_content(Path(args.image).expanduser(), args.prompt)
-    print(response_text(chat(data, model, content, args.max_tokens, args.timeout)))
+    payload = {
+        **model_arg(args.model),
+        **image_payload(Path(args.image).expanduser()),
+        "prompt": args.prompt,
+        "max_tokens": args.max_tokens,
+        "timeout": args.timeout,
+    }
+    print(daemon(data, "/v1/vision", payload, args.timeout)["text"])
 
 
 def cmd_use(args) -> None:
     data = registry()
-    key, model = resolve(args.model, data)
-    result = chat(data, model, "Reply with OK only.", 8, args.timeout)
-    print(f"loaded: {key}")
-    print(response_text(result))
+    result = daemon(data, "/v1/warm", {**model_arg(args.model), "timeout": args.timeout}, args.timeout)
+    print(f"loaded: {result['model']}")
+    print(result.get("text", ""))
 
 
-def cmd_unload(_args) -> None:
+def cmd_unload(args) -> None:
     data = registry()
-    result = request(data, "/unload", {}, timeout=30)
+    result = daemon(data, "/v1/unload", model_arg(args.model), timeout=30)
     print(result.get("message", json.dumps(result)))
 
 
@@ -194,13 +173,15 @@ def cmd_benchmark(args) -> None:
     prompt = args.prompt or (
         "Read the exact heading and number, then name the two colored shapes. Answer in one line."
     )
+    image_fields = image_payload(image)
     for key, model in data["models"].items():
         if "vision" not in model.get("capabilities", []):
             continue
+        payload = {"model": key, **image_fields, "prompt": prompt, "max_tokens": args.max_tokens, "timeout": args.timeout}
         start = time.perf_counter()
-        result = chat(data, model, image_content(image, prompt), args.max_tokens, args.timeout)
+        text = daemon(data, "/v1/vision", payload, args.timeout)["text"]
         elapsed = time.perf_counter() - start
-        print(f"{key}\t{elapsed:.2f}s\t{response_text(result).replace(chr(10), ' ')}")
+        print(f"{key}\t{elapsed:.2f}s\t{text.replace(chr(10), ' ')}")
 
 
 # -- registry commands (pull / add / rm) -----------------------------------
@@ -267,7 +248,15 @@ def cmd_pull(args) -> None:
     except ImportError:
         raise SystemExit("huggingface_hub is required: python3 -m pip install huggingface_hub")
 
-    data = registry() if registry_path().exists() else {"version": 1, "default": None, "server": {"base_url": "http://127.0.0.1:8080", "api": "mlx-vlm"}, "aliases": {}, "models": {}}
+    data = registry() if registry_path().exists() else {
+        "version": 1,
+        "default": None,
+        "server": {"base_url": "http://127.0.0.1:8080", "api": "mlx-vlm"},
+        "daemon": {"base_url": daemon_base_url()},
+        "completion_server": {"base_url": "http://127.0.0.1:8079"},
+        "aliases": {},
+        "models": {},
+    }
     key = args.name or args.repo_id.rsplit("/", 1)[-1]
     if key in data.get("models", {}) and not args.force:
         raise SystemExit(f"'{key}' is already registered. Use --force to re-pull or --name for a new id.")
@@ -341,7 +330,7 @@ def parser() -> argparse.ArgumentParser:
     ls.add_argument("-v", "--verbose", action="store_true")
     ls.set_defaults(func=cmd_list)
 
-    status = sub.add_parser("status", help="show server status")
+    status = sub.add_parser("status", help="show daemon status and what is warm")
     status.set_defaults(func=cmd_status)
 
     path = sub.add_parser("path", help="print a model path")
@@ -368,7 +357,8 @@ def parser() -> argparse.ArgumentParser:
     use.add_argument("--timeout", type=int, default=180)
     use.set_defaults(func=cmd_use)
 
-    unload = sub.add_parser("unload", help="unload the active model")
+    unload = sub.add_parser("unload", help="unload a model (default: the registry default) and free its RAM")
+    unload.add_argument("model", nargs="?", default="default")
     unload.set_defaults(func=cmd_unload)
 
     bench = sub.add_parser("benchmark", help="run all vision models on the same image")

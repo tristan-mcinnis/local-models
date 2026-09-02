@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -28,7 +29,7 @@ def main() -> None:
         registry = {
             "version": 1,
             "default": "fake",
-            "server": {"base_url": "http://127.0.0.1:1", "api": "mlx-vlm"},
+            "server": {"base_url": f"http://127.0.0.1:{free_port()}", "api": "mlx-vlm"},
             "aliases": {},
             "models": {
                 "fake": {
@@ -90,6 +91,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    import urllib.error
-
     main()

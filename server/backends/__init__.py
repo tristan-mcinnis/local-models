@@ -3,9 +3,14 @@
 A backend serves one or more capabilities (vision, completion, transcription,
 tts, embeddings, ...) for models whose registry entry names it via "backend".
 
-Contract: subclass Backend, set `name` and `capabilities`, implement `infer`.
-Register by adding the class to BACKENDS. The daemon routes a request to the
-backend named by the resolved model's registry entry; nothing else changes.
+Contract: subclass Backend, set `name` and `capabilities`, implement `infer`
+and `status`. Register the class in `all_backends()`. The daemon routes a
+request to the backend named by the resolved model's registry entry.
+
+Every backend reports the same status shape:
+    {"available": bool, "loaded_model": str|None, "detail": str}
+and every unload returns {"message": str}. Errors are BackendError (the
+daemon answers 502) or NotSupported (the daemon answers 501).
 """
 
 from __future__ import annotations
@@ -21,19 +26,24 @@ class NotSupported(BackendError):
     """Raised when a capability is registered but not yet implemented."""
 
 
+def status_dict(available: bool, loaded_model: str | None, detail: str) -> dict[str, Any]:
+    return {"available": available, "loaded_model": loaded_model, "detail": detail}
+
+
 class Backend:
     name: str = "abstract"
     capabilities: tuple[str, ...] = ()
+    #: Data-plane URL apps may stream from directly (None = daemon only).
+    base_url: str | None = None
 
     def __init__(self, registry: dict):
         self.registry = registry
 
     def status(self) -> dict[str, Any]:
-        """Return {"available": bool, "loaded_model": str|None, "detail": str}."""
-        return {"available": False, "loaded_model": None, "detail": "not implemented"}
+        return status_dict(False, None, "not implemented")
 
     def infer(self, model: dict, payload: dict) -> dict:
-        """Serve one request for a model this backend owns. Returns a JSON-able dict."""
+        """Serve one request for a model this backend owns. Returns {"text": str, "raw": ...}."""
         raise NotSupported(f"backend '{self.name}' cannot serve this request yet")
 
     def warm(self, model: dict, payload: dict) -> dict:
@@ -48,12 +58,11 @@ class Backend:
 
 
 def all_backends() -> dict[str, type[Backend]]:
-    from . import llama_gguf, mlx_stt, mlx_vlm
+    from . import llama_gguf, mlx_audio_stt, mlx_vlm
 
     return {
-        mlx_vlm.MlxVlmBackend.name: mlx_vlm.MlxVlmBackend,
-        llama_gguf.LlamaGgufBackend.name: llama_gguf.LlamaGgufBackend,
-        mlx_stt.MlxSttBackend.name: mlx_stt.MlxSttBackend,
+        cls.name: cls
+        for cls in (mlx_vlm.MlxVlmBackend, llama_gguf.LlamaGgufBackend, mlx_audio_stt.MlxAudioSttBackend)
     }
 
 

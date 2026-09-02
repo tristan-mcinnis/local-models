@@ -13,7 +13,11 @@ One machine, many tiny models, one owner of their lifecycle.
   registry entry's `backend` field is the router.
 - **CLIs (`cli/`)** — `local-model` (registry, lifecycle, pull, text/vision
   calls) and `local-image` (OCR, describe, UI inventory, schema-validated
-  extraction). Scriptable from anything: shell, launchd, agent skills.
+  extraction). Scriptable from anything: shell, launchd, agent skills. Model
+  calls go through the daemon, never to a backend port.
+- **Shared plumbing (`server/common.py`)** — the one definition of the
+  registry location, model resolution, the daemon URL, and proxy-free JSON
+  over HTTP. Daemon, backends, and CLIs all import it.
 - **Clients (`client/`)** — thin per-language wrappers. Apps never load
   weights, never shell out to model runtimes, never hardcode paths.
 

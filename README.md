@@ -29,8 +29,8 @@ and the memory. Adding a sixth app costs a client call, not a model integration.
                         ~/Models/ registry + weights
 ```
 
-\* completion and transcription backends are phase 2; the endpoints exist and
-return honest 501s until then.
+\* transcription is phase 2; its endpoint exists and returns an honest 501
+until then. Completion serves (daemon-managed llama-server).
 
 ## Install
 
@@ -39,7 +39,7 @@ git clone https://github.com/tristan-mcinnis/local-models.git
 cd local-models
 make install          # symlinks local-model + local-image onto PATH,
                       # seeds ~/Models/models.json from the example if absent
-make install-server   # optional: launchd agent for the daemon (port 8078)
+make install-server   # launchd agent for the daemon (port 8078); the CLIs need it
 ```
 
 Requirements: macOS on Apple Silicon, Python 3.11+, [mlx-vlm](https://github.com/Blaizzy/mlx-vlm)
@@ -65,12 +65,17 @@ never enter git; the registry is the only integration surface.
 
 ## Use models
 
+Every call below goes through the daemon; the CLIs never talk to a backend
+server directly. `LOCAL_MODELS_DAEMON` (or `daemon.base_url` in the
+registry) overrides the default `http://127.0.0.1:8078`.
+
 ```bash
-local-model status                    # what's running, what's warm
+local-model status                    # daemon health, warm models, per-backend state
 local-model vision shot.png "What error does this dialog show?"
 local-model ask "Summarize: ..."      # text through the same warm model
 local-model benchmark                 # race every vision model on one fixture
-local-model unload                    # free the RAM
+local-model use gemma-completion      # warm a model (spawns llama-server for GGUF)
+local-model unload [model]            # free the RAM
 
 local-image ocr receipt.png           # Apple Vision / Tesseract, no model needed
 local-image describe photo.png
@@ -90,14 +95,21 @@ curl -s localhost:8078/v1/models | jq        # every model + warm state
 curl -s localhost:8078/health | jq           # per-backend availability
 ```
 
-| Endpoint | State |
-|---|---|
-| `POST /v1/vision` | serving (mlx-vlm backend) |
-| `POST /v1/ask` | serving |
-| `POST /v1/complete` | serving (llama-gguf backend: daemon-managed llama-server, ~57 ms warm first token) |
-| `POST /v1/warm`, `/v1/unload` | serving (per-model lifecycle) |
-| `GET /v1/models`, `/health` | serving |
-| `POST /v1/transcribe` | phase 2 (MLX speech models) |
+| Route | Request | Success body | State |
+|---|---|---|---|
+| `GET /health` | | `{status, service, backends: {name: {available, loaded_model, detail}}}` | serving |
+| `GET /v1/models` | | `{default, models: [{id, backend, capabilities, path, warm, backend_available, endpoint}]}` | serving |
+| `POST /v1/vision` | `{model?, prompt?, image_b64 \| image_path, mime?, max_tokens?, timeout?}` | `{model, text}` | serving (mlx-vlm) |
+| `POST /v1/ask` | `{model?, prompt, max_tokens?, timeout?}` | `{model, text}` | serving |
+| `POST /v1/complete` | `{model?, prompt, system?, max_tokens?, timeout?}` | `{model, text}` | serving (llama-gguf, ~57 ms warm first token) |
+| `POST /v1/warm` | `{model?}` | `{model, warmed, text}` | serving |
+| `POST /v1/unload` | `{model?}` | `{model, unloaded, message}` | serving |
+| `POST /v1/transcribe` | | | phase 2 (501) |
+
+Every error is `{"error": "<message>"}` plus an optional `"hint"`:
+400 bad request or unknown model, 404 no route, 501 planned but not served,
+502 backend unreachable or failed. `model` accepts an id or an alias; omit it
+for the registry default.
 
 Completion apps stream straight from the managed llama-server (the `endpoint`
 field in `/v1/models`); the daemon is the control plane that spawns, warms,

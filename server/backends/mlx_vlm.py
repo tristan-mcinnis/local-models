@@ -13,24 +13,13 @@ import subprocess
 import sys
 import time
 import urllib.error
-import urllib.request
-from pathlib import Path
 from typing import Any
 
-from . import Backend, BackendError
+from common import http_json, model_path
 
+from . import Backend, BackendError, status_dict
 
-def _request(base_url: str, path: str, payload: dict | None = None, timeout: int = 180):
-    url = base_url.rstrip("/") + path
-    body = None if payload is None else json.dumps(payload).encode()
-    req = urllib.request.Request(
-        url,
-        data=body,
-        method="GET" if payload is None else "POST",
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as response:
-        return json.load(response)
+DEFAULT_BASE_URL = "http://127.0.0.1:8080"
 
 
 class MlxVlmBackend(Backend):
@@ -39,13 +28,13 @@ class MlxVlmBackend(Backend):
 
     def __init__(self, registry: dict):
         super().__init__(registry)
-        self.base_url = registry.get("server", {}).get("base_url", "http://127.0.0.1:8080")
+        self.base_url = registry.get("server", {}).get("base_url", DEFAULT_BASE_URL)
         self._child: subprocess.Popen | None = None
 
     # -- lifecycle ---------------------------------------------------------
     def health(self) -> dict | None:
         try:
-            return _request(self.base_url, "/health", timeout=5)
+            return http_json(self.base_url, "/health", timeout=5)
         except (OSError, urllib.error.URLError, json.JSONDecodeError):
             return None
 
@@ -70,24 +59,20 @@ class MlxVlmBackend(Backend):
     def status(self) -> dict[str, Any]:
         health = self.health()
         if health is None:
-            return {"available": False, "loaded_model": None, "detail": f"no server at {self.base_url}"}
-        return {
-            "available": True,
-            "loaded_model": health.get("loaded_model"),
-            "detail": health.get("status", "unknown"),
-        }
+            return status_dict(False, None, f"no server at {self.base_url}")
+        return status_dict(True, health.get("loaded_model"), health.get("status", "unknown"))
 
     def infer(self, model: dict, payload: dict) -> dict:
-        """payload: {"messages": [...], "max_tokens": int, "temperature": float}."""
+        """payload: {"messages": [...], "max_tokens": int, "temperature": float, "timeout": float}."""
         body = {
-            "model": str(Path(model["path"]).expanduser()),
+            "model": model_path(model),
             "temperature": payload.get("temperature", 0),
             "max_tokens": payload.get("max_tokens", 512),
             "stream": False,
             "messages": payload["messages"],
         }
         try:
-            result = _request(self.base_url, "/chat/completions", body, payload.get("timeout", 180))
+            result = http_json(self.base_url, "/chat/completions", body, payload.get("timeout", 180))
         except urllib.error.HTTPError as exc:
             raise BackendError(f"mlx-vlm server HTTP {exc.code}: {exc.read().decode(errors='replace')}")
         except OSError as exc:
@@ -100,6 +85,8 @@ class MlxVlmBackend(Backend):
 
     def unload(self) -> dict:
         try:
-            return _request(self.base_url, "/unload", {}, timeout=30)
+            result = http_json(self.base_url, "/unload", {}, timeout=30)
         except (OSError, urllib.error.URLError) as exc:
             raise BackendError(f"unload failed: {exc}")
+        message = result.get("message") if isinstance(result, dict) else None
+        return {"message": message or "vision model unloaded"}

@@ -6,6 +6,7 @@ import http.client
 import importlib.util
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -23,13 +24,22 @@ serve = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(serve)
 
 
-def make_home(tmp: Path) -> Path:
-    """A temp LOCAL_MODELS_HOME with one fake registered model."""
+def closed_port() -> int:
+    """A port nothing listens on (bound then released), so backend calls fail fast."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def make_home(tmp: Path, daemon_url: str = "http://127.0.0.1:8078") -> Path:
+    """A temp LOCAL_MODELS_HOME with one fake registered model and no live backend."""
     (tmp / "fake-model").mkdir()
     registry = {
         "version": 1,
         "default": "fake",
-        "server": {"base_url": "http://127.0.0.1:1", "api": "mlx-vlm"},
+        "server": {"base_url": f"http://127.0.0.1:{closed_port()}", "api": "mlx-vlm"},
+        "daemon": {"base_url": daemon_url},
+        "completion_server": {"base_url": f"http://127.0.0.1:{closed_port()}"},
         "aliases": {"default": "fake"},
         "models": {
             "fake": {
@@ -65,7 +75,7 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(key, "m")
 
     def test_resolve_unknown_raises(self):
-        with self.assertRaises(KeyError):
+        with self.assertRaises(serve.RegistryError):
             serve.resolve_model({"default": "x", "aliases": {}, "models": {}}, "nope")
 
 
@@ -157,8 +167,28 @@ class DaemonRoutingTests(unittest.TestCase):
         status, data = self.http("GET", "/health")
         self.assertEqual(status, 200)
         self.assertEqual(data["status"], "ok")
-        self.assertIn("mlx-vlm", data["backends"])
-        self.assertIn("llama-gguf", data["backends"])
+        self.assertEqual(set(data["backends"]), {"mlx-vlm", "llama-gguf", "mlx-audio-stt"})
+        for backend in data["backends"].values():
+            self.assertEqual(set(backend), {"available", "loaded_model", "detail"})
+
+    def test_error_envelope_is_uniform(self):
+        cases = [
+            ("GET", "/nope", None, 404),
+            ("POST", "/nope", {}, 404),
+            ("POST", "/v1/ask", {}, 400),
+            ("POST", "/v1/transcribe", {}, 501),
+            ("POST", "/v1/warm", {"model": "fake"}, 502),
+        ]
+        for method, path, body, expected in cases:
+            status, data = self.http(method, path, body)
+            self.assertEqual(status, expected, (method, path, data))
+            self.assertIsInstance(data["error"], str)
+            self.assertTrue(set(data) <= {"error", "hint"}, data)
+
+    def test_unload_unreachable_backend_502(self):
+        status, data = self.http("POST", "/v1/unload", {})
+        self.assertEqual(status, 502)
+        self.assertIn("unload failed", data["error"])
 
     def test_models_lists_registry_with_warm_state(self):
         status, data = self.http("GET", "/v1/models")
@@ -207,6 +237,62 @@ class DaemonRoutingTests(unittest.TestCase):
         status, data = self.http("POST", "/v1/warm", {"model": "fake"})
         self.assertEqual(status, 502)
         self.assertIn("unavailable", data["error"])
+
+
+class CliThroughDaemonTests(unittest.TestCase):
+    """The CLIs reach models only through the daemon; the daemon's error
+    envelope surfaces verbatim in the CLI's exit message."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), serve.Handler)
+        port = cls.server.server_address[1]
+        cls.home = make_home(Path(cls._tmp.name), daemon_url=f"http://127.0.0.1:{port}")
+        serve.Handler.registry = json.loads((cls.home / "models.json").read_text())
+        serve.Handler.backend_cache = {}
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls._tmp.cleanup()
+
+    def test_status_reports_daemon_and_backends(self):
+        result = run_cli(self.home, "status")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("server: ok", result.stdout)
+        self.assertIn("backend mlx-vlm: unavailable", result.stdout)
+        self.assertIn("default: fake", result.stdout)
+
+    def test_ask_surfaces_daemon_error_envelope(self):
+        result = run_cli(self.home, "ask", "hi")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("HTTP 502", result.stderr)
+        self.assertIn("mlx-vlm server unavailable", result.stderr)
+
+    def test_vision_unknown_model_is_400(self):
+        fixture = REPO / "tests" / "fixtures" / "vision-test.png"
+        result = run_cli(self.home, "vision", str(fixture), "what?", "--model", "ghost")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("HTTP 400", result.stderr)
+        self.assertIn("unknown model 'ghost'", result.stderr)
+
+    def test_local_image_describe_goes_through_daemon(self):
+        fixture = REPO / "tests" / "fixtures" / "vision-test.png"
+        env = {**os.environ, "LOCAL_MODELS_HOME": str(self.home)}
+        result = subprocess.run(
+            [sys.executable, str(REPO / "cli" / "local-image"), "describe", str(fixture)],
+            capture_output=True, text=True, env=env, timeout=60,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("HTTP 502", result.stderr)
+
+    def test_daemon_down_is_a_clear_message(self):
+        env = {**os.environ, "LOCAL_MODELS_HOME": str(self.home), "LOCAL_MODELS_DAEMON": f"http://127.0.0.1:{closed_port()}"}
+        result = subprocess.run([sys.executable, str(CLI), "status"], capture_output=True, text=True, env=env, timeout=60)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("daemon is unavailable", result.stderr)
 
 
 if __name__ == "__main__":

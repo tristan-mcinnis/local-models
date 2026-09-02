@@ -38,7 +38,7 @@
       "quantization_bits": 4,
       "size_bytes": 0,
       "capabilities": ["completion"],
-      "role": "example completion entry (phase 2 backend)",
+      "role": "example completion entry (daemon-managed llama-server)",
       "verified": false
     }
   }

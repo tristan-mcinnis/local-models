@@ -7,68 +7,52 @@ import argparse
 import base64
 import json
 import mimetypes
-import os
 import re
 import subprocess
 import sys
 import urllib.error
-import urllib.request
 from pathlib import Path
 
 import jsonschema
 
-ROOT = Path(os.environ.get("LOCAL_MODELS_HOME", str(Path.home() / "Models"))).expanduser()
-REGISTRY = ROOT / "models.json"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "server"))
+from common import RegistryError, daemon_base_url, http_error_detail, http_json, load_registry  # noqa: E402
+from common import resolve_model as _resolve_model  # noqa: E402
 
 
-def load_registry() -> dict:
+def registry() -> dict:
     try:
-        return json.loads(REGISTRY.read_text())
-    except (OSError, json.JSONDecodeError) as exc:
-        raise SystemExit(f"Cannot read {REGISTRY}: {exc}")
+        return load_registry()
+    except RegistryError as exc:
+        raise SystemExit(str(exc))
 
 
 def resolve_model(data: dict, name: str) -> tuple[str, dict]:
-    key = data.get("aliases", {}).get(name, name)
-    model = data.get("models", {}).get(key)
-    if model is None:
-        raise SystemExit(f"Unknown model '{name}'")
-    if not Path(model["path"]).expanduser().is_dir():
-        raise SystemExit(f"Model directory is missing: {model['path']}")
-    return key, model
+    try:
+        return _resolve_model(data, name)
+    except RegistryError as exc:
+        raise SystemExit(str(exc))
 
 
-def image_part(path: Path) -> dict:
+def image_payload(path: Path) -> dict:
     if not path.is_file():
         raise SystemExit(f"Image not found: {path}")
-    mime = mimetypes.guess_type(path.name)[0] or "image/png"
-    encoded = base64.b64encode(path.read_bytes()).decode()
-    return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}}
-
-
-def call_server(data: dict, model: dict, messages: list[dict], max_tokens: int, timeout: int) -> str:
-    url = data["server"]["base_url"].rstrip("/") + "/chat/completions"
-    payload = {
-        "model": str(Path(model["path"]).expanduser()),
-        "temperature": 0,
-        "max_tokens": max_tokens,
-        "stream": False,
-        "messages": messages,
+    return {
+        "image_b64": base64.b64encode(path.read_bytes()).decode(),
+        "mime": mimetypes.guess_type(path.name)[0] or "image/png",
     }
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode(),
-        method="POST",
-        headers={"Content-Type": "application/json"},
-    )
+
+
+def vision(data: dict, model_id: str, image: Path, prompt: str, max_tokens: int, timeout: int) -> str:
+    """One image + prompt through the daemon's POST /v1/vision."""
+    base = daemon_base_url(data)
+    payload = {"model": model_id, **image_payload(image), "prompt": prompt, "max_tokens": max_tokens, "timeout": timeout}
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            result = json.load(response)
-        return result["choices"][0]["message"]["content"].strip()
+        return http_json(base, "/v1/vision", payload, timeout)["text"]
     except urllib.error.HTTPError as exc:
-        raise SystemExit(f"Local model server HTTP {exc.code}: {exc.read().decode(errors='replace')}")
-    except (OSError, KeyError, IndexError, TypeError) as exc:
-        raise SystemExit(f"Local image analysis failed: {exc}")
+        raise SystemExit(f"local-models daemon returned HTTP {exc.code}: {http_error_detail(exc)}")
+    except (OSError, KeyError, TypeError) as exc:
+        raise SystemExit(f"Local image analysis failed via {base}: {exc}")
 
 
 def apple_vision_ocr(image: Path) -> dict:
@@ -169,11 +153,9 @@ def cmd_ocr(args) -> None:
 
 
 def analyze(args, prompt: str) -> None:
-    data = load_registry()
-    _, model = resolve_model(data, args.model)
-    image = Path(args.image).expanduser()
-    messages = [{"role": "user", "content": [image_part(image), {"type": "text", "text": prompt}]}]
-    print(call_server(data, model, messages, args.max_tokens, args.timeout))
+    data = registry()
+    key, _ = resolve_model(data, args.model)
+    print(vision(data, key, Path(args.image).expanduser(), prompt, args.max_tokens, args.timeout))
 
 
 def cmd_describe(args) -> None:
@@ -211,15 +193,14 @@ def cmd_extract(args) -> None:
     if ocr and ocr["text"]:
         prompt += f"\n\nOCR evidence from {ocr['engine']} (may contain errors; verify against the image):\n{ocr['text'][:16000]}"
 
-    data = load_registry()
-    key, model = resolve_model(data, args.model)
-    content = [image_part(image), {"type": "text", "text": prompt}]
-    messages = [{"role": "user", "content": content}]
+    data = registry()
+    key, _ = resolve_model(data, args.model)
+    attempt_prompt = prompt
     last_text = ""
     last_error = ""
 
     for attempt in range(args.retries + 1):
-        last_text = call_server(data, model, messages, args.max_tokens, args.timeout)
+        last_text = vision(data, key, image, attempt_prompt, args.max_tokens, args.timeout)
         try:
             value = parse_json_object(last_text)
             jsonschema.validate(value, schema)
@@ -237,14 +218,13 @@ def cmd_extract(args) -> None:
         except (ValueError, jsonschema.ValidationError) as exc:
             last_error = str(exc)
             if attempt < args.retries:
-                messages = [
-                    {"role": "user", "content": content},
-                    {"role": "assistant", "content": last_text},
-                    {
-                        "role": "user",
-                        "content": "The JSON was invalid. Correct it and return JSON only. Validation error: " + last_error,
-                    },
-                ]
+                attempt_prompt = (
+                    prompt
+                    + "\n\nYour previous answer was:\n"
+                    + last_text
+                    + "\n\nThat JSON was invalid. Correct it and return JSON only. Validation error: "
+                    + last_error
+                )
 
     print(f"Structured extraction failed validation: {last_error}", file=sys.stderr)
     if args.show_invalid:

@@ -54,6 +54,8 @@ restart:
 logs:
 	tail -50 $(HOME)/Library/Logs/local-models.log
 
+## Offline unit tests + daemon smoke + publish scrub. Live gates: tests/compat.sh.
 test:
 	python3 -m unittest discover -s tests -p "test_*.py"
 	python3 tests/smoke_daemon.py
+	sh tests/scrub.sh
