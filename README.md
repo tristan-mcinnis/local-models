@@ -135,13 +135,20 @@ A minimal Swift client for native apps ships in
 
 ## Menu bar
 
-A tiny menu-bar app shows the fleet at a glance: every registered model, a
-filled dot on the warm one, click to load, one item to unload and free the
-RAM. It talks only to the daemon.
+A menu-bar app shows the fleet at a glance on the house design system
+([Slate](../design-system/DESIGN.md), the shared "Menu bar panel" component): a
+300 px glass panel with the daemon's state and switch in the header, one 36 px
+row per registered model with its capabilities and whether it is warm, Return
+to load and ⌘Return to unload, then Refresh (⌘R) and Open registry. It talks
+only to the daemon and to the daemon's launchd job.
 
 ```bash
-make install-menubar   # builds dist/Local Models.app, copies to /Applications, launches
+make menubar           # builds dist/Local Models.app
+make install-menubar   # builds, copies to /Applications, launches
 ```
+
+`LocalModelsBar --render-proof <dir>` writes the panel and settings surfaces to
+PNGs offscreen, in both appearances, without showing a window.
 
 ## Design rules
 
