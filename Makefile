@@ -30,6 +30,8 @@ menubar:
 	mkdir -p "dist/Local Models.app/Contents/MacOS"
 	cp menubar/LocalModelsBar/.build/release/LocalModelsBar "dist/Local Models.app/Contents/MacOS/"
 	cp menubar/LocalModelsBar/Info.plist "dist/Local Models.app/Contents/Info.plist"
+	mkdir -p "dist/Local Models.app/Contents/Resources"
+	cp menubar/LocalModelsBar/Resources/AppIcon.icns "dist/Local Models.app/Contents/Resources/AppIcon.icns"
 	@echo "built: dist/Local Models.app"
 
 ## Copy the menu-bar app to /Applications and launch it.
