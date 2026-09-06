@@ -1,4 +1,4 @@
-// GENERATED from design-system/tokens.json f7490aadb52c; do not edit
+// GENERATED from design-system/tokens.json fe2b0cd6e404; do not edit
 // Source of truth: the design-system repo (DESIGN.md + tokens.json).
 // Regenerate with `make swift` there; `make check` verifies this copy.
 
@@ -524,6 +524,7 @@ enum House {
     }
 
     enum Control {
+        static let statusGlyph: CGFloat = 15.0
         static let keyCap: CGFloat = 20.0
         static let tile: CGFloat = 26.0
         static let compact: CGFloat = 28.0

@@ -51,7 +51,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let button = statusItem?.button else { return }
         let symbol = model.daemonUp && model.warmCount > 0 ? "cpu.fill" : "cpu"
         let description = "Local Models — \(model.headline)"
-        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: description)
+        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: description)?
+            .withSymbolConfiguration(
+                NSImage.SymbolConfiguration(pointSize: House.Control.statusGlyph, weight: .medium)
+            )
         image?.isTemplate = true
         button.image = image
         button.toolTip = description
