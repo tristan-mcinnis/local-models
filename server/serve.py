@@ -310,21 +310,38 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="local-models daemon")
-    parser.add_argument("--port", type=int, default=int(os.environ.get("LOCAL_MODELS_PORT", DEFAULT_PORT)))
-    parser.add_argument("--registry", type=Path, default=None)
-    parser.add_argument("--ensure-vision", action="store_true", help="adopt or spawn the mlx-vlm server at startup")
-    args = parser.parse_args()
+def make_server(args) -> ThreadingHTTPServer:
+    """Load the registry, run startup readying, and bind the HTTP server.
 
+    A failed vision ensure (e.g. a launchd-managed server that never came up)
+    is a warning, not a fatal startup error: the daemon still binds and serves
+    degraded — vision calls return 502 until the backend is available — instead
+    of killing the whole process.
+    """
     try:
         Handler.registry = load_registry(args.registry)
     except RegistryError as exc:
         raise SystemExit(str(exc))
     if args.ensure_vision:
-        get_backend("mlx-vlm", Handler.registry).ensure()
+        try:
+            get_backend("mlx-vlm", Handler.registry).ensure()
+        except BackendError as exc:
+            print(
+                f"warning: vision backend not ensured; serving degraded: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+    return ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
 
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="local-models daemon")
+    parser.add_argument("--port", type=int, default=int(os.environ.get("LOCAL_MODELS_PORT", DEFAULT_PORT)))
+    parser.add_argument("--registry", type=Path, default=None)
+    parser.add_argument("--ensure-vision", action="store_true", help="adopt, wait for a managed launchd owner, or spawn the mlx-vlm server at startup")
+    args = parser.parse_args()
+
+    server = make_server(args)
     print(f"local-models daemon on http://127.0.0.1:{args.port}", flush=True)
     try:
         server.serve_forever()

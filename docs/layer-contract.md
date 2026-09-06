@@ -36,6 +36,54 @@ app routes to it behind a user toggle with its in-process engine as the
 off-switch fallback. Transcription stays at 1 until the dictation app
 stabilizes.
 
+## Server ownership
+
+The vision backend (`mlx-vlm`) decides who owns its server in one of three
+ways, so exactly one process ever answers a given `server.base_url`:
+
+1. **Adopt** — if a server already answers at the registry `base_url`, the
+   backend uses it as-is and never starts another.
+2. **Wait for a managed owner** — if the registry names a `server.launch_agent`
+   (a launchd agent), that agent owns the process. `ensure()` waits a bounded
+   time for it to come up and never spawns a competing child; on timeout it
+   raises an actionable error naming the agent.
+3. **Spawn one child** — with no managed owner, `ensure()` spawns exactly one
+   loopback-only, no-reload `uvicorn` child and waits for health on it. A child
+   that fails to become healthy is terminated, and only a child the backend
+   itself spawned is ever cleaned up, never a managed or adopted process.
+
+`server.launch_agent` is an optional registry key. When set, it names a
+launchd agent and makes that agent the single owner: the daemon waits for it
+and never spawns a duplicate. When absent, the backend is unmanaged — the
+daemon spawns one loopback-only child itself.
+
+```json
+{
+  "server": {
+    "base_url": "http://127.0.0.1:8080",
+    "api": "mlx-vlm",
+    "launch_agent": "com.example.mlx-vlm-server"
+  }
+}
+```
+
+Set `launch_agent` only when a launchd agent for that server is genuinely
+installed under exactly that label. The label in the example is a placeholder;
+use the label of the agent you actually loaded (`launchctl list`). If no agent
+exists, omit the key — the default unmanaged behavior spawns its own
+loopback-only child. The shipped example registry stays unmanaged by design.
+
+An unmanaged child always binds `127.0.0.1` (explicit `--host`, via the uvicorn
+entrypoint rather than the module that turns on a reload worker) and never
+binds a wildcard interface.
+
+This removes the historical race where two starters (a launchd agent and the
+daemon's `--ensure-vision`) could both bring the same port up, leaving a
+duplicate process listening next to the managed one. A duplicate costs a
+second copy of the model's resident memory and exposes the server on a
+non-loopback interface, so the ownership rule keeps the fleet to one warm,
+loopback-only server per port.
+
 ## Latency budgets (what "serving" must mean)
 
 | Capability | Budget | Why |
