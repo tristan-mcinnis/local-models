@@ -1,4 +1,4 @@
-// GENERATED from design-system/tokens.json fe2b0cd6e404; do not edit
+// GENERATED from design-system/tokens.json 85ead24dee81; do not edit
 // Source of truth: the design-system repo (DESIGN.md + tokens.json).
 // Regenerate with `make swift` there; `make check` verifies this copy.
 
@@ -495,8 +495,8 @@ enum House {
         static let answerPanelWidth: CGFloat = 800.0
         static let answerMaxWidth: CGFloat = 620.0
         static let settingsRail: CGFloat = 220.0
-        static let settingsWidth: CGFloat = 760.0
-        static let settingsHeight: CGFloat = 540.0
+        static let settingsWidth: CGFloat = 860.0
+        static let settingsHeight: CGFloat = 620.0
     }
 
     enum Radius {
