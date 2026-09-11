@@ -1,4 +1,4 @@
-// GENERATED from design-system/tokens.json 85ead24dee81; do not edit
+// GENERATED from design-system/tokens.json 139c2b88c9cd; do not edit
 // Source of truth: the design-system repo (DESIGN.md + tokens.json).
 // Regenerate with `make swift` there; `make check` verifies this copy.
 
@@ -491,9 +491,11 @@ enum House {
 
     /// Fixed layout widths and heights shared by the apps.
     enum Layout {
-        static let panelWidth: CGFloat = 720.0
-        static let answerPanelWidth: CGFloat = 800.0
+        static let panelWidth: CGFloat = 750.0
+        static let answerPanelWidth: CGFloat = 750.0
         static let answerMaxWidth: CGFloat = 620.0
+        static let quickAIHeight: CGFloat = 475.0
+        static let quickAIAnswerMaxWidth: CGFloat = 690.0
         static let settingsRail: CGFloat = 220.0
         static let settingsWidth: CGFloat = 860.0
         static let settingsHeight: CGFloat = 620.0
