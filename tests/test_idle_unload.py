@@ -98,9 +98,38 @@ class FakeHandler:
     def backend(self, name):
         return self.backend_cache[name]
 
+    def backend_status(self, name):
+        return self.backend_cache[name].status()
+
+    def sweep_candidates(self):
+        return list(self.backend_cache)
+
+
+class AdoptedHandler(FakeHandler):
+    """A handler that knows a backend it never built: the adopted case, where a
+    model is warm inside a server this daemon only found running. The backend
+    cache is empty, so a sweeper that walked the cache would never see it."""
+
+    def __init__(self, backends: dict) -> None:
+        super().__init__({})
+        self.known = backends
+
+    def backend(self, name):
+        return self.known[name]
+
+    def backend_status(self, name):
+        return self.known[name].status()
+
+    def sweep_candidates(self):
+        return list(self.known)
+
 
 def sweeper(backends: dict, threshold: float, use: serve.BackendUse) -> serve.IdleSweeper:
     return serve.IdleSweeper(FakeHandler(backends), threshold, interval=3600, use=use)
+
+
+def adopted_sweeper(backends: dict, threshold: float, use: serve.BackendUse) -> serve.IdleSweeper:
+    return serve.IdleSweeper(AdoptedHandler(backends), threshold, interval=3600, use=use)
 
 
 class UseClockTests(unittest.TestCase):
@@ -142,9 +171,72 @@ class UseClockTests(unittest.TestCase):
             self.assertFalse(granted)
 
     def test_claim_refused_for_a_backend_that_was_never_used(self):
+        """Never used and never seen warm: there is nothing there to reclaim."""
         self.clock.advance(10_000)
         with self.use.unload_claim("mlx-vlm", min_idle=60) as granted:
             self.assertFalse(granted)
+
+    def test_a_backend_seen_warm_ages_from_the_sighting(self):
+        self.use.observe_warm("mlx-vlm", True)
+        self.assertEqual(self.use.idle_seconds("mlx-vlm"), 0.0)
+        self.clock.advance(300)
+        self.assertEqual(self.use.idle_seconds("mlx-vlm"), 300.0)
+
+    def test_the_basis_says_where_the_age_came_from(self):
+        self.assertEqual(self.use.idle_state("mlx-vlm"), (None, None))
+        self.use.observe_warm("mlx-vlm", True)
+        self.clock.advance(10)
+        self.assertEqual(self.use.idle_state("mlx-vlm"), (10.0, "observed-warm"))
+        with self.use.using("mlx-vlm"):
+            pass
+        self.clock.advance(5)
+        self.assertEqual(self.use.idle_state("mlx-vlm"), (5.0, "use"))
+
+    def test_seeing_it_warm_again_does_not_reset_its_age(self):
+        """Otherwise every sweep would restart the clock and nothing would age."""
+        self.use.observe_warm("mlx-vlm", True)
+        for _ in range(5):
+            self.clock.advance(60)
+            self.use.observe_warm("mlx-vlm", True)
+        self.assertEqual(self.use.idle_seconds("mlx-vlm"), 300.0)
+
+    def test_real_use_beats_the_sighting(self):
+        self.use.observe_warm("mlx-vlm", True)
+        self.clock.advance(1_000)
+        with self.use.using("mlx-vlm"):
+            pass
+        self.clock.advance(10)
+        self.assertEqual(self.use.idle_seconds("mlx-vlm"), 10.0)
+
+    def test_seeing_it_cold_drops_the_sighting(self):
+        self.use.observe_warm("mlx-vlm", True)
+        self.clock.advance(100)
+        self.use.observe_warm("mlx-vlm", False)
+        self.assertIsNone(self.use.idle_seconds("mlx-vlm"))
+
+    def test_claim_granted_on_a_sighting_past_the_threshold(self):
+        self.use.observe_warm("mlx-vlm", True)
+        self.clock.advance(60)
+        with self.use.unload_claim("mlx-vlm", min_idle=60) as granted:
+            self.assertTrue(granted)
+
+    def test_claim_refused_on_a_sighting_under_the_threshold(self):
+        self.use.observe_warm("mlx-vlm", True)
+        self.clock.advance(59)
+        with self.use.unload_claim("mlx-vlm", min_idle=60) as granted:
+            self.assertFalse(granted)
+
+    def test_claim_clears_the_sighting_too(self):
+        self.use.observe_warm("mlx-vlm", True)
+        self.clock.advance(100)
+        with self.use.unload_claim("mlx-vlm", min_idle=60) as granted:
+            self.assertTrue(granted)
+        self.assertIsNone(self.use.idle_seconds("mlx-vlm"))
+
+    def test_forget_clears_the_sighting_too(self):
+        self.use.observe_warm("mlx-vlm", True)
+        self.use.forget("mlx-vlm")
+        self.assertIsNone(self.use.idle_seconds("mlx-vlm"))
 
     def test_claim_refused_while_a_request_is_in_flight(self):
         with self.use.using("mlx-vlm"):
@@ -239,9 +331,91 @@ class SweeperTests(unittest.TestCase):
         self.assertEqual(self.backend.unload_calls, 1)
 
     def test_sweeping_a_never_used_backend_does_nothing(self):
+        """Cold and unused: nothing to reclaim, so nothing is touched."""
         self.clock.advance(100_000)
         self.assertEqual(sweeper(self.backends, 1800, self.use).sweep(), [])
         self.assertEqual(self.backend.unload_calls, 0)
+
+    def test_a_warm_backend_with_no_use_is_not_unloaded_on_sight(self):
+        """It may have been warmed seconds before this daemon started; it gets
+        the same threshold as everything else, counted from now."""
+        self.backend.loaded_path = "/fake/model"
+        self.assertEqual(sweeper(self.backends, 1800, self.use).sweep(), [])
+        self.assertEqual(self.backend.unload_calls, 0)
+        self.assertEqual(self.use.idle_state("mlx-vlm"), (0.0, "observed-warm"))
+
+    def test_a_warm_backend_with_no_use_goes_one_threshold_later(self):
+        self.backend.loaded_path = "/fake/model"
+        sweep = sweeper(self.backends, 1800, self.use)
+        self.assertEqual(sweep.sweep(), [])
+        self.clock.advance(1799)
+        self.assertEqual(sweep.sweep(), [])
+        self.assertEqual(self.backend.unload_calls, 0)
+        self.clock.advance(2)
+        self.assertEqual(sweep.sweep(), ["mlx-vlm"])
+        self.assertEqual(self.backend.unload_calls, 1)
+        self.assertFalse(self.backend.loaded_path)
+
+    def test_a_daemon_restart_does_not_make_a_long_warm_model_immortal(self):
+        """The bug this fixes: a restart clears every use stamp, so a model warm
+        since the previous process would never be claimed again. Sweep on the
+        real cadence and it is reclaimed one threshold after the restart."""
+        self.backend.loaded_path = "/fake/model"          # warm since before us
+        self.clock.advance(10 * 24 * 3600)                # ...for ten days
+        sweep = sweeper(self.backends, 1800, self.use)
+        unloaded = []
+        for _ in range(40):                               # 40 ticks of a minute
+            unloaded += sweep.sweep()
+            self.clock.advance(60)
+        self.assertEqual(unloaded, ["mlx-vlm"])
+        self.assertEqual(self.backend.unload_calls, 1)
+
+    def test_an_adopted_backend_outside_the_cache_is_considered(self):
+        """The vision case: the model is warm inside a server the daemon only
+        adopted, so the backend is never in the cache. It is still swept, and it
+        is unloaded through the backend's own unload, not by killing anything."""
+        self.backend.loaded_path = "/fake/model"
+        sweep = adopted_sweeper(self.backends, 1800, self.use)
+        self.assertEqual(sweep.handler.backend_cache, {})
+        self.assertEqual(sweep.sweep(), [])
+        self.clock.advance(1801)
+        self.assertEqual(sweep.sweep(), ["mlx-vlm"])
+        self.assertEqual(self.backend.unload_calls, 1)
+
+    def test_a_warm_unused_backend_in_flight_is_never_unloaded_from_under(self):
+        self.backend.loaded_path = "/fake/model"
+        sweep = sweeper(self.backends, 1800, self.use)
+        self.assertEqual(sweep.sweep(), [])
+        self.clock.advance(100_000)
+        self.backend.release_infer.clear()
+        held = threading.Thread(target=self._infer_under_use, daemon=True)
+        held.start()
+        self.assertTrue(self.backend.infer_started.wait(timeout=5))
+        try:
+            self.assertEqual(sweep.sweep(), [])
+            self.assertEqual(self.backend.unload_calls, 0)
+        finally:
+            self.backend.release_infer.set()
+            held.join(timeout=5)
+
+    def test_threshold_zero_still_disables_a_warm_unused_backend(self):
+        self.backend.loaded_path = "/fake/model"
+        self.clock.advance(100_000)
+        sweep = sweeper(self.backends, 0, self.use)
+        self.assertFalse(sweep.enabled)
+        self.assertEqual(sweep.sweep(), [])
+        self.assertEqual(self.backend.unload_calls, 0)
+
+    def test_a_stamped_backend_is_unchanged_by_the_sighting(self):
+        """A backend that has actually worked ages from its work, exactly as
+        before: the sighting never shortens or lengthens its clock."""
+        self.use_once()
+        sweep = sweeper(self.backends, 1800, self.use)
+        self.clock.advance(1799)
+        self.assertEqual(sweep.sweep(), [])
+        self.assertEqual(self.use.idle_state("mlx-vlm"), (1799.0, "use"))
+        self.clock.advance(2)
+        self.assertEqual(sweep.sweep(), ["mlx-vlm"])
 
 
 class ThresholdConfigTests(unittest.TestCase):
@@ -406,6 +580,34 @@ class DaemonIdleTests(unittest.TestCase):
         self.assertEqual(self.http("POST", "/v1/warm", {})[0], 200)
         self.assertEqual(self.use.idle_seconds("mlx-vlm"), 0.0)
 
+    def test_models_reports_an_observed_age_for_a_warm_unused_backend(self):
+        """Warm with nothing recorded against it used to report null forever.
+        It now reports how long the daemon has seen it warm, and polling the
+        list does not reset that: reading state is still not use."""
+        self.backend.loaded_path = self.model_path
+        _, data = self.http("GET", "/v1/models")
+        self.assertTrue(data["models"][0]["warm"])
+        self.assertEqual(data["models"][0]["idle_seconds"], 0.0)
+        self.assertEqual(data["models"][0]["idle_basis"], "observed-warm")
+        for expected in (300.0, 600.0):
+            self.clock.advance(300)
+            _, data = self.http("GET", "/v1/models")
+            self.assertEqual(data["models"][0]["idle_seconds"], expected)
+        # And the sweeper reclaims it, through the backend's own unload.
+        self.clock.advance(1801)
+        swept = serve.IdleSweeper(serve.Handler, 1800, interval=3600, use=self.use).sweep()
+        self.assertEqual(swept, ["mlx-vlm"])
+        self.assertEqual(self.backend.unload_calls, 1)
+        _, data = self.http("GET", "/v1/models")
+        self.assertFalse(data["models"][0]["warm"])
+        self.assertIsNone(data["models"][0]["idle_seconds"])
+
+    def test_a_cold_backend_still_reports_no_clock_at_all(self):
+        _, data = self.http("GET", "/v1/models")
+        self.assertFalse(data["models"][0]["warm"])
+        self.assertIsNone(data["models"][0]["idle_seconds"])
+        self.assertIsNone(data["models"][0]["idle_basis"])
+
     def test_models_keeps_the_shape_clients_parse(self):
         _, data = self.http("GET", "/v1/models")
         row = data["models"][0]
@@ -415,6 +617,7 @@ class DaemonIdleTests(unittest.TestCase):
         self.assertTrue(row["endpoint"].startswith("http://127.0.0.1"))
         self.assertIn("backend_available", row)
         self.assertIn("idle_seconds", row)
+        self.assertIn("idle_basis", row)
         self.assertIn("idle_unload_seconds", data)
 
     def test_explicit_unload_clears_the_idle_clock(self):

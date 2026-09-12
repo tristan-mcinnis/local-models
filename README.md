@@ -98,7 +98,7 @@ curl -s localhost:8078/health | jq           # per-backend availability
 | Route | Request | Success body | State |
 |---|---|---|---|
 | `GET /health` | | `{status, service, backends: {name: {available, loaded_model, detail}}}` | serving |
-| `GET /v1/models` | | `{default, idle_unload_seconds, models: [{id, backend, capabilities, path, warm, backend_available, endpoint, idle_seconds, in_flight}]}` | serving |
+| `GET /v1/models` | | `{default, idle_unload_seconds, models: [{id, backend, capabilities, path, warm, backend_available, endpoint, idle_seconds, idle_basis, in_flight}]}` | serving |
 | `POST /v1/vision` | `{model?, prompt?, image_b64 \| image_path, mime?, max_tokens?, timeout?}` | `{model, text}` | serving (mlx-vlm) |
 | `POST /v1/ask` | `{model?, prompt, max_tokens?, timeout?}` | `{model, text}` | serving |
 | `POST /v1/complete` | `{model?, prompt, system?, max_tokens?, timeout?}` | `{model, text}` | serving (llama-gguf, ~57 ms warm first token) |
@@ -131,6 +131,16 @@ and a sweeper thread unloads any backend that has gone unused for longer than
 the threshold. Reading state is not use: `/health` and `/v1/models` never keep
 a model warm, or the menu bar's own polling would.
 
+A backend can be warm with no use recorded against it: a vision server the
+daemon adopted rather than started, or any model still loaded from before the
+daemon last restarted, since a restart resets every stamp. That is the case the
+whole mechanism exists for, so it is swept too. Each tick asks every candidate
+backend whether it is holding a model; the first tick that finds one warm and
+unused starts its clock there, and it becomes claimable one threshold later —
+not on sight, so a model warmed seconds before a restart keeps its full
+threshold. An adopted server is unloaded through its own `/unload`; the server
+process is never touched.
+
 ```json
 { "daemon": { "base_url": "http://127.0.0.1:8078", "idle_unload_seconds": 1800 } }
 ```
@@ -143,9 +153,10 @@ The unload can never land under a live request: the sweeper takes the same
 claim a request holds, and only when nothing is in flight. The next request
 after an idle unload readies the backend again and succeeds — it pays the
 reload, it does not get an error — so the cost of a too-eager threshold is
-latency, never a failure. `GET /v1/models` reports `idle_seconds` per model
-(null when its backend has served nothing since it started or was last
-unloaded) and the threshold in force, and `local-model status` prints both.
+latency, never a failure. `GET /v1/models` reports `idle_seconds` per model,
+`idle_basis` (`"use"` for work the backend did, `"observed-warm"` for one found
+warm with no use behind it, both null when it is cold and unused), and the
+threshold in force; `local-model status` prints the age and the threshold.
 
 Completion apps stream straight from the managed llama-server (the `endpoint`
 field in `/v1/models`); the daemon is the control plane that spawns, warms,
