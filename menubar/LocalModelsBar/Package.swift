@@ -10,6 +10,10 @@ let package = Package(
     // Memory, which are macOS 14 apps.
     platforms: [.macOS(.v14)],
     targets: [
-        .executableTarget(name: "LocalModelsBar")
+        .executableTarget(name: "LocalModelsBar"),
+        // The app's own window rules: the menu bar a normal window gets, and
+        // when the app goes back to being a menu-bar app. AppKit only, no
+        // window is opened.
+        .testTarget(name: "LocalModelsBarTests", dependencies: ["LocalModelsBar"])
     ]
 )

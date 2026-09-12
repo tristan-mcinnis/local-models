@@ -13,6 +13,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private let model = PanelModel()
     private lazy var panel = MenuBarPanelController(model: model)
+    /// The menu bar shown while a normal window is open.
+    private lazy var settingsMenu = SettingsMenu(showSettings: { [weak self] in self?.openSettings() })
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         UserDefaults.standard.register(defaults: [
@@ -77,10 +79,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Settings
 
     @objc private func openSettings() {
-        if let controller = settingsWindowController {
+        if let controller = settingsWindowController, let window = controller.window {
             controller.showWindow(nil)
-            controller.window?.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+            present(window)
             return
         }
 
@@ -95,10 +96,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.setContentSize(NSSize(width: 760, height: 500))
         window.minSize = NSSize(width: 720, height: 460)
 
+        window.isReleasedWhenClosed = false
+        window.delegate = self
         let controller = NSWindowController(window: window)
         controller.showWindow(self)
         window.center()
-        NSApp.activate(ignoringOtherApps: true)
+        present(window)
         settingsWindowController = controller
+    }
+
+    /// A normal window is up: install the menu bar it needs (Edit for its
+    /// text fields, Window for minimise and close) and take the keyboard.
+    /// An accessory app cannot activate itself on request alone, so
+    /// `AppActivation` asks LaunchServices when the request is refused.
+    private func present(_ window: NSWindow) {
+        if NSApp.mainMenu == nil { NSApp.mainMenu = settingsMenu.makeMenu() }
+        AppActivation.becomeRegularApp(showing: window)
+    }
+}
+
+extension AppDelegate: NSWindowDelegate {
+    /// The last normal window is closing: hand the menu bar back and become
+    /// a menu-bar app again.
+    func windowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow else { return }
+        if window === settingsWindowController?.window { settingsWindowController = nil }
+        AppActivation.settleAfterClosing(window)
     }
 }
