@@ -55,7 +55,11 @@ struct ModelPanelRow: View {
         .disabled(!isEnabled)
         .onHover { if $0 { onHover() } }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(model.id), \(model.warm ? "warm" : "not loaded")")
+        .accessibilityLabel(
+            [model.id, model.warm ? "warm" : "not loaded", model.idleLabel]
+                .compactMap { $0 }
+                .joined(separator: ", ")
+        )
         .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
     }
 

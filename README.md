@@ -98,7 +98,7 @@ curl -s localhost:8078/health | jq           # per-backend availability
 | Route | Request | Success body | State |
 |---|---|---|---|
 | `GET /health` | | `{status, service, backends: {name: {available, loaded_model, detail}}}` | serving |
-| `GET /v1/models` | | `{default, models: [{id, backend, capabilities, path, warm, backend_available, endpoint}]}` | serving |
+| `GET /v1/models` | | `{default, idle_unload_seconds, models: [{id, backend, capabilities, path, warm, backend_available, endpoint, idle_seconds, in_flight}]}` | serving |
 | `POST /v1/vision` | `{model?, prompt?, image_b64 \| image_path, mime?, max_tokens?, timeout?}` | `{model, text}` | serving (mlx-vlm) |
 | `POST /v1/ask` | `{model?, prompt, max_tokens?, timeout?}` | `{model, text}` | serving |
 | `POST /v1/complete` | `{model?, prompt, system?, max_tokens?, timeout?}` | `{model, text}` | serving (llama-gguf, ~57 ms warm first token) |
@@ -120,6 +120,32 @@ Every error is `{"error": "<message>"}` plus an optional `"hint"`:
 400 bad request or unknown model, 404 no route, 501 planned but not served,
 502 backend unreachable or failed. `model` accepts an id or an alias; omit it
 for the registry default.
+
+### Idle unloading
+
+A model warmed once and then forgotten holds its resident memory until someone
+remembers to unload it — in practice, for days, and a 2B GGUF is about 9 GB.
+The daemon therefore stamps a clock every time a request puts a backend to work
+(`/v1/vision`, `/v1/ask`, `/v1/complete`, `/v1/warm`, `/v1/chat/completions`)
+and a sweeper thread unloads any backend that has gone unused for longer than
+the threshold. Reading state is not use: `/health` and `/v1/models` never keep
+a model warm, or the menu bar's own polling would.
+
+```json
+{ "daemon": { "base_url": "http://127.0.0.1:8078", "idle_unload_seconds": 1800 } }
+```
+
+Default 30 minutes; `0` (or `LOCAL_MODELS_IDLE_UNLOAD_SECONDS=0`) switches it
+off and a model stays warm until it is unloaded by hand, as before. The
+override is `LOCAL_MODELS_IDLE_UNLOAD_SECONDS`, in seconds.
+
+The unload can never land under a live request: the sweeper takes the same
+claim a request holds, and only when nothing is in flight. The next request
+after an idle unload readies the backend again and succeeds — it pays the
+reload, it does not get an error — so the cost of a too-eager threshold is
+latency, never a failure. `GET /v1/models` reports `idle_seconds` per model
+(null when its backend has served nothing since it started or was last
+unloaded) and the threshold in force, and `local-model status` prints both.
 
 Completion apps stream straight from the managed llama-server (the `endpoint`
 field in `/v1/models`); the daemon is the control plane that spawns, warms,

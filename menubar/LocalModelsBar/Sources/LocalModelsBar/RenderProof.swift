@@ -55,7 +55,7 @@ enum RenderProof {
         let json = """
         {"models":[
           {"id":"qwen3-vl","backend":"mlx-vlm","capabilities":["text","image","vision"],
-           "warm":true,"backend_available":true},
+           "warm":true,"backend_available":true,"idle_seconds":740},
           {"id":"gemma-completion","backend":"llama-gguf","capabilities":["completion"],
            "warm":false,"backend_available":true},
           {"id":"parakeet-stt","backend":"mlx-audio","capabilities":["audio"],

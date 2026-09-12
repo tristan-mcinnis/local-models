@@ -8,18 +8,36 @@ struct ModelRow: Decodable, Identifiable, Equatable {
     let capabilities: [String]
     let warm: Bool
     let backendAvailable: Bool
+    /// How long the model's backend has gone unused, as the daemon reports it.
+    /// Null until the backend has served something, and again after it is
+    /// unloaded. Absent on a daemon older than idle unloading.
+    let idleSeconds: Double?
 
     enum CodingKeys: String, CodingKey {
         case id, backend, capabilities, warm
         case backendAvailable = "backend_available"
+        case idleSeconds = "idle_seconds"
     }
 
-    /// The row's secondary line: what the model can do. The backend is left
-    /// out on purpose — with the warm chip beside it there is not room for
-    /// both at 300 px, and the capabilities are what a reader is choosing on.
+    /// The row's secondary line: what the model can do, and how long it has
+    /// been sitting there when it is warm. The backend is left out on purpose —
+    /// with the warm chip beside it there is not room for both at 300 px, and
+    /// the capabilities are what a reader is choosing on.
     var detail: String {
         let caps = capabilities.joined(separator: " · ")
-        return caps.isEmpty ? backend : caps
+        let base = caps.isEmpty ? backend : caps
+        guard let idle = idleLabel else { return base }
+        return "\(base) · \(idle)"
+    }
+
+    /// The idle phrase for a warm row. A cold model has nothing to age, and a
+    /// backend that has done no work since the daemon started reports nothing,
+    /// so both cases say nothing rather than guessing a zero.
+    var idleLabel: String? {
+        guard warm, let seconds = idleSeconds, seconds >= 0 else { return nil }
+        if seconds < 60 { return "idle <1m" }
+        if seconds < 3600 { return "idle \(Int(seconds / 60))m" }
+        return "idle \(Int(seconds / 3600))h"
     }
 }
 

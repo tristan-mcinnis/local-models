@@ -13,6 +13,14 @@ pluggable backends, and reports which models are warm.
   POST /v1/unload       {"model"?}  unload the backend that owns that model
   POST /v1/transcribe   planned (501)
 
+Warm models are the point of the daemon, but a model warmed once and then
+forgotten holds its resident memory for days. Every request that puts a backend
+to work stamps that backend's clock (reading state through /health or
+/v1/models does not), and a sweeper thread unloads any backend that goes
+`daemon.idle_unload_seconds` unused — 30 minutes by default, 0 to switch it
+off, $LOCAL_MODELS_IDLE_UNLOAD_SECONDS to override. The next request readies
+the backend again, so an idle unload costs a reload, never an error.
+
 OpenAI-compatible passthrough (for clients that speak OpenAI chat, e.g.
 Quick Launch's local provider), so no app needs a backend port:
 
@@ -36,10 +44,13 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import json
 import mimetypes
 import os
 import sys
+import threading
+import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -52,12 +63,21 @@ from common import (  # noqa: E402
     OPENER,
     RegistryError,
     backend_name,
+    idle_unload_seconds,
     load_registry,
     model_path,
     resolve_model,
 )
 
 DEFAULT_PORT = int(DEFAULT_DAEMON_URL.rsplit(":", 1)[-1])
+#: How often the sweeper looks for idle backends. Coarse on purpose: the
+#: threshold is minutes, so a minute of slack costs nothing and the sweep stays
+#: invisible next to the work.
+SWEEP_INTERVAL_SECONDS = 60.0
+#: How long an explicit POST /v1/unload waits for in-flight requests to finish
+#: before unloading anyway. The user asked for it, so it never refuses; it just
+#: does not cut a request off mid-answer if it can help it.
+MANUAL_UNLOAD_DRAIN_SECONDS = 30.0
 
 
 def image_content(payload: dict, prompt: str) -> list[dict]:
@@ -85,6 +105,168 @@ def require_prompt(payload: dict) -> str:
     if not prompt:
         raise ValueError("prompt is required")
     return prompt
+
+
+class BackendUse:
+    """When each backend was last used, and who is using it right now.
+
+    The daemon is threaded: every request runs on its own thread and the idle
+    sweeper runs on one more. This is the single place that knows both facts,
+    and its lock is the one thing that keeps an unload from landing under a
+    request that is still being served.
+
+    Use means work a backend actually did: an inference, a warm, a relayed
+    OpenAI chat. Reading state does not count — `/health` and `/v1/models` ask
+    every backend how it is doing, and if that counted as use nothing would
+    ever go idle, because the menu bar polls `/v1/models` on a timer.
+    """
+
+    def __init__(self, clock=time.monotonic):
+        self._clock = clock
+        # One condition (and so one lock) guards all three maps below.
+        self._cond = threading.Condition()
+        self._last_used: dict[str, float] = {}
+        self._in_flight: dict[str, int] = {}
+        self._unloading: set[str] = set()
+
+    @contextlib.contextmanager
+    def using(self, name: str):
+        """Hold `name` in use for one request: stamp the clock, count it in
+        flight, and wait out any unload already running so the request never
+        talks to a backend that is being torn down."""
+        with self._cond:
+            while name in self._unloading:
+                self._cond.wait()
+            self._in_flight[name] = self._in_flight.get(name, 0) + 1
+            self._last_used[name] = self._clock()
+        try:
+            yield
+        finally:
+            with self._cond:
+                self._in_flight[name] = max(0, self._in_flight.get(name, 0) - 1)
+                # Stamp again on the way out: a three-minute vision call is use
+                # for its whole length, not just for the instant it started.
+                self._last_used[name] = self._clock()
+                self._cond.notify_all()
+
+    def idle_seconds(self, name: str) -> float | None:
+        """Seconds since `name` last finished work, 0.0 while it is working,
+        None when it has done none since it was started or last unloaded."""
+        with self._cond:
+            if self._in_flight.get(name, 0):
+                return 0.0
+            last = self._last_used.get(name)
+            return None if last is None else max(0.0, self._clock() - last)
+
+    def in_flight(self, name: str) -> int:
+        with self._cond:
+            return self._in_flight.get(name, 0)
+
+    def forget(self, name: str) -> None:
+        """Drop `name`'s idle clock: an unloaded backend has nothing to age."""
+        with self._cond:
+            self._last_used.pop(name, None)
+
+    @contextlib.contextmanager
+    def unload_claim(self, name: str, min_idle: float | None = None, wait: float = 0.0):
+        """Own the unload of `name` for the block; yields True when granted.
+
+        While the claim is held `using()` blocks, so no new request starts
+        against a backend that is being torn down, and a request already in
+        flight is waited out: the claim is only granted once the in-flight
+        count is zero. `min_idle` is the sweeper's extra condition — idle at
+        least that long, and never granted to a backend with no idle clock at
+        all. `wait` is how long to wait for in-flight requests to drain; the
+        sweeper passes 0 and simply tries again on its next tick.
+        """
+        granted = False
+        with self._cond:
+            deadline = time.monotonic() + wait
+            while self._in_flight.get(name, 0) or name in self._unloading:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._cond.wait(timeout=remaining)
+            if not self._in_flight.get(name, 0) and name not in self._unloading:
+                last = self._last_used.get(name)
+                idle_enough = min_idle is None or (
+                    last is not None and self._clock() - last >= min_idle
+                )
+                if idle_enough:
+                    self._unloading.add(name)
+                    granted = True
+        try:
+            yield granted
+        finally:
+            if granted:
+                with self._cond:
+                    self._unloading.discard(name)
+                    self._last_used.pop(name, None)
+                    self._cond.notify_all()
+
+
+#: The daemon's one use tracker, shared by the request handler and the sweeper.
+USE = BackendUse()
+
+
+class IdleSweeper(threading.Thread):
+    """Unloads backends nobody has used for a while.
+
+    Warm weights are the point of this daemon, but a model warmed once and then
+    forgotten holds its resident memory until someone remembers to unload it —
+    in practice, for days. This walks the backends the daemon has built and
+    unloads any whose last use is older than the threshold.
+
+    It can never unload a backend out from under a request: the claim it takes
+    is the same one `BackendUse.using()` waits on, and it is granted only when
+    nothing is in flight. A backend it cannot claim is simply left for the next
+    tick.
+    """
+
+    def __init__(self, handler, threshold: float, interval: float = SWEEP_INTERVAL_SECONDS, use: BackendUse | None = None):
+        super().__init__(name="idle-sweeper", daemon=True)
+        self.handler = handler
+        self.threshold = threshold
+        self.interval = interval
+        self.use = use or USE
+        self._stop = threading.Event()
+
+    @property
+    def enabled(self) -> bool:
+        return self.threshold > 0
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def run(self) -> None:
+        while not self._stop.wait(self.interval):
+            self.sweep()
+
+    def sweep(self) -> list[str]:
+        """One pass. Returns the names of the backends it unloaded."""
+        if not self.enabled:
+            return []
+        unloaded = []
+        for name in list(self.handler.backend_cache):
+            with self.use.unload_claim(name, min_idle=self.threshold) as granted:
+                if not granted:
+                    continue
+                try:
+                    self.handler.backend(name).unload()
+                except BackendError as exc:
+                    # An unload the daemon is not allowed to do (a llama-server
+                    # someone else started) is reported once and then left
+                    # alone: the claim clears the idle clock on the way out, so
+                    # this does not repeat every tick.
+                    print(f"idle unload of {name} skipped: {exc}", file=sys.stderr, flush=True)
+                    continue
+                unloaded.append(name)
+                print(
+                    f"idle unload: {name} went {self.threshold:.0f}s unused",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        return unloaded
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -149,7 +331,13 @@ class Handler(BaseHTTPRequestHandler):
             self._error(502, str(exc))
 
     def _infer(self, model: dict, payload: dict) -> dict:
-        return self.backend(backend_name(model)).infer(model, payload)
+        name = backend_name(model)
+        with USE.using(name):
+            backend = self.backend(name)
+            # Idle unloading means the backend that served the last call may be
+            # cold now, so ready it first: the caller pays a reload, not a 502.
+            backend.prepare(model)
+            return backend.infer(model, payload)
 
     # -- GET ---------------------------------------------------------------
     def do_GET(self):
@@ -166,6 +354,14 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, {"status": "ok", "service": "local-models", "backends": backends})
 
     def get_models(self) -> None:
+        """Every registered model with its live warm state and idle clock.
+
+        `idle_seconds` is a property of the backend, not of the model: two
+        models on one backend report the same number, because one unload frees
+        both. It is null when the backend has done no work since the daemon
+        started or since it was last unloaded. Listing is not use, so calling
+        this never keeps a model warm.
+        """
         out = []
         status_cache: dict[str, dict] = {}
         for key, model in self.registry.get("models", {}).items():
@@ -178,6 +374,7 @@ class Handler(BaseHTTPRequestHandler):
                 endpoint = self.backend(name).base_url
             except BackendError:
                 endpoint = None
+            idle = USE.idle_seconds(name)
             out.append(
                 {
                     "id": key,
@@ -187,9 +384,18 @@ class Handler(BaseHTTPRequestHandler):
                     "warm": status.get("loaded_model") == resolved_path,
                     "backend_available": status.get("available", False),
                     "endpoint": endpoint,
+                    "idle_seconds": None if idle is None else round(idle, 1),
+                    "in_flight": USE.in_flight(name),
                 }
             )
-        self._send(200, {"default": self.registry.get("default"), "models": out})
+        self._send(
+            200,
+            {
+                "default": self.registry.get("default"),
+                "idle_unload_seconds": idle_unload_seconds(self.registry),
+                "models": out,
+            },
+        )
 
     def get_openai_models(self) -> None:
         """OpenAI `GET /v1/models` shape: ids plus aliases of every model whose
@@ -252,13 +458,21 @@ class Handler(BaseHTTPRequestHandler):
     def post_warm(self) -> None:
         payload = self._payload()
         key, model = resolve_model(self.registry, payload.get("model"))
-        result = self.backend(backend_name(model)).warm(model, payload)
+        name = backend_name(model)
+        with USE.using(name):
+            result = self.backend(name).warm(model, payload)
         self._send(200, {"model": key, "warmed": True, "text": result["text"]})
 
     def post_unload(self) -> None:
         payload = self._payload()
         key, model = resolve_model(self.registry, payload.get("model"))
-        result = self.backend(backend_name(model)).unload()
+        name = backend_name(model)
+        # An explicit unload is what the user asked for, so it never refuses on
+        # a busy backend: it waits a bounded time for in-flight requests to
+        # finish, then unloads either way, as it always has.
+        with USE.unload_claim(name, wait=MANUAL_UNLOAD_DRAIN_SECONDS):
+            result = self.backend(name).unload()
+        USE.forget(name)
         self._send(200, {"model": key, "unloaded": True, "message": result.get("message", "unloaded")})
 
     def post_transcribe(self) -> None:
@@ -275,9 +489,16 @@ class Handler(BaseHTTPRequestHandler):
         except RegistryError as exc:
             self._error(404, str(exc))
             return
-        backend = self.backend(backend_name(model))
+        name = backend_name(model)
+        backend = self.backend(name)
         if backend.chat_completions_path is None or backend.base_url is None:
             raise NotSupported(f"backend '{backend.name}' has no OpenAI chat endpoint")
+        # In use for the whole relay, not just the handshake: an SSE stream can
+        # run for minutes and must not be unloaded out from under the client.
+        with USE.using(name):
+            self._relay_chat_completions(backend, key, model, payload)
+
+    def _relay_chat_completions(self, backend, key: str, model: dict, payload: dict) -> None:
         backend.prepare(model)
         # The backends key on the weight path, not the registry id.
         body = json.dumps({**payload, "model": model_path(model)}).encode()
@@ -331,7 +552,20 @@ def make_server(args) -> ThreadingHTTPServer:
                 file=sys.stderr,
                 flush=True,
             )
-    return ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    # The sweeper is attached to the server so the caller owns its lifetime;
+    # it is a daemon thread, so a dead server never keeps the process alive.
+    server.idle_sweeper = IdleSweeper(Handler, idle_unload_seconds(Handler.registry))
+    if server.idle_sweeper.enabled:
+        server.idle_sweeper.start()
+        print(
+            f"idle unload after {server.idle_sweeper.threshold:.0f}s unused",
+            file=sys.stderr,
+            flush=True,
+        )
+    else:
+        print("idle unload disabled (threshold 0)", file=sys.stderr, flush=True)
+    return server
 
 
 def main() -> None:
