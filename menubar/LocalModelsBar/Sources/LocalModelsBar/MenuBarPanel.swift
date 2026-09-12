@@ -450,8 +450,7 @@ final class MenuBarPanelController {
         let panel = self.panel ?? makePanel()
         self.panel = panel
         model.selection = 0
-        model.isPanelOpen = true
-        model.poll()
+        model.panelOpened()
 
         panel.setContentSize(panel.contentView?.fittingSize ?? NSSize(width: MenuBarPanelView.width + 32, height: 320))
         if let origin = anchorFrame(for: button, size: panel.frame.size) {
