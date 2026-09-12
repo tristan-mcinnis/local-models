@@ -6,7 +6,8 @@
     "api": "mlx-vlm"
   },
   "daemon": {
-    "base_url": "http://127.0.0.1:8078"
+    "base_url": "http://127.0.0.1:8078",
+    "idle_unload_seconds": 1800
   },
   "completion_server": {
     "base_url": "http://127.0.0.1:8079"

@@ -8,18 +8,36 @@ struct ModelRow: Decodable, Identifiable, Equatable {
     let capabilities: [String]
     let warm: Bool
     let backendAvailable: Bool
+    /// How long the model's backend has gone unused, as the daemon reports it.
+    /// Null until the backend has served something, and again after it is
+    /// unloaded. Absent on a daemon older than idle unloading.
+    let idleSeconds: Double?
 
     enum CodingKeys: String, CodingKey {
         case id, backend, capabilities, warm
         case backendAvailable = "backend_available"
+        case idleSeconds = "idle_seconds"
     }
 
-    /// The row's secondary line: what the model can do. The backend is left
-    /// out on purpose — with the warm chip beside it there is not room for
-    /// both at 300 px, and the capabilities are what a reader is choosing on.
+    /// The row's secondary line: what the model can do, and how long it has
+    /// been sitting there when it is warm. The backend is left out on purpose —
+    /// with the warm chip beside it there is not room for both at 300 px, and
+    /// the capabilities are what a reader is choosing on.
     var detail: String {
         let caps = capabilities.joined(separator: " · ")
-        return caps.isEmpty ? backend : caps
+        let base = caps.isEmpty ? backend : caps
+        guard let idle = idleLabel else { return base }
+        return "\(base) · \(idle)"
+    }
+
+    /// The idle phrase for a warm row. A cold model has nothing to age, and a
+    /// backend that has done no work since the daemon started reports nothing,
+    /// so both cases say nothing rather than guessing a zero.
+    var idleLabel: String? {
+        guard warm, let seconds = idleSeconds, seconds >= 0 else { return nil }
+        if seconds < 60 { return "idle <1m" }
+        if seconds < 3600 { return "idle \(Int(seconds / 60))m" }
+        return "idle \(Int(seconds / 3600))h"
     }
 }
 
@@ -112,6 +130,19 @@ final class PanelModel: ObservableObject {
     private var pollTimer: Timer?
     private let defaults: UserDefaults
 
+    /// When the panel was last opened. Launch counts as an open, so a Mac
+    /// that has just started polls at the normal rate until the first idle
+    /// threshold passes.
+    private var lastOpenedAt = Date()
+    /// When the last poll landed, which is how old the rows on screen are.
+    /// Nil until the first answer comes back.
+    var lastPolledAt: Date?
+    /// The clock, injected so the idle backoff is tested without waiting.
+    var now: () -> Date = { Date() }
+    /// The read a stale open kicks off behind the panel. It is the ordinary
+    /// poll; a test replaces it so that opening a panel calls no daemon.
+    lazy var backgroundRefresh: () -> Void = { [weak self] in self?.poll() }
+
     /// Raised while the panel is on screen, so polling speeds up.
     var isPanelOpen = false { didSet { schedulePoll() } }
 
@@ -124,6 +155,19 @@ final class PanelModel: ObservableObject {
     static let pollIntervalKey = "pollIntervalSeconds"
     /// How often the panel asks the daemon while it is open.
     static let openPollInterval: TimeInterval = 5
+    /// How long the panel can go unopened before the poll starts stretching.
+    /// Two hours is longer than a walk away from the desk and shorter than a
+    /// morning, so a registry nobody has looked at since breakfast stops
+    /// costing two HTTP calls a minute.
+    static let idleThreshold: TimeInterval = 2 * 60 * 60
+    /// The longest gap between polls, however long nobody looks. Half an hour
+    /// keeps the backoff bounded: at worst one open finds rows half an hour
+    /// old and reads again behind the panel.
+    static let idlePollCeiling: TimeInterval = 30 * 60
+    /// The share of the interval macOS may slide a poll wakeup by, so it can
+    /// batch this timer with others instead of waking the CPU for it alone.
+    /// A background poll owes nobody a particular second.
+    static let pollToleranceFraction = 0.15
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -236,19 +280,75 @@ final class PanelModel: ObservableObject {
         poll()
     }
 
-    /// The interval the panel polls at: fast while it is open, the user's
-    /// setting while it is closed.
-    private var pollInterval: TimeInterval {
-        if isPanelOpen { return Self.openPollInterval }
+    /// The interval the panel polls at while it is in use, from the user's
+    /// setting.
+    var baseInterval: TimeInterval {
         let stored = defaults.double(forKey: Self.pollIntervalKey)
         return stored > 0 ? stored : 60
     }
 
+    /// The interval the panel polls at now: fast while it is open, the user's
+    /// setting while it is closed, and a longer one once nobody has opened it
+    /// for hours.
+    var pollInterval: TimeInterval {
+        if isPanelOpen { return Self.openPollInterval }
+        return Self.backedOffInterval(base: baseInterval, idleFor: idleDuration)
+    }
+
+    /// How long since the panel was last opened.
+    private var idleDuration: TimeInterval { max(0, now().timeIntervalSince(lastOpenedAt)) }
+
+    /// The interval to poll at, given the configured interval and how long the
+    /// panel has gone unopened. Under the threshold it is the configured
+    /// interval; past it the gap doubles for every further threshold, up to the
+    /// ceiling. A configured interval longer than the ceiling is the user's
+    /// choice and is never shortened. Pure, so the decision is tested without a
+    /// clock.
+    static func backedOffInterval(base: TimeInterval, idleFor: TimeInterval) -> TimeInterval {
+        guard idleFor >= idleThreshold else { return base }
+        // Eight doublings pass any ceiling; the cap keeps the exponent small.
+        let steps = min(Int(idleFor / idleThreshold), 8)
+        return max(base, min(base * pow(2, Double(steps)), idlePollCeiling))
+    }
+
+    /// Whether what is on screen is older than one normal poll. An unpolled
+    /// panel counts as stale: there is nothing on screen to trust yet.
+    static func isStale(age: TimeInterval?, base: TimeInterval) -> Bool {
+        guard let age else { return true }
+        return age > base
+    }
+
+    /// How old the rows on screen are, by the time the last poll landed.
+    private var snapshotAge: TimeInterval? {
+        lastPolledAt.map { now().timeIntervalSince($0) }
+    }
+
+    /// What the armed poll timer is set to, for tests. Nil when none is armed.
+    var scheduledPoll: (interval: TimeInterval, tolerance: TimeInterval)? {
+        pollTimer.map { ($0.timeInterval, $0.tolerance) }
+    }
+
     func schedulePoll() {
         pollTimer?.invalidate()
-        pollTimer = Timer.scheduledTimer(withTimeInterval: pollInterval, repeats: true) { [weak self] _ in
+        let interval = pollInterval
+        let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in self?.poll() }
         }
+        // Let macOS batch this wakeup with whatever else wakes near it rather
+        // than waking the CPU for the poll alone.
+        timer.tolerance = interval * Self.pollToleranceFraction
+        pollTimer = timer
+    }
+
+    /// Called when the panel opens. Opening draws the rows already in hand at
+    /// once and waits on no call. It ends any idle backoff, so the cadence is
+    /// back to normal from here, and when what is on screen is older than one
+    /// poll it starts a call behind the panel rather than letting an aged warm
+    /// count pass for a fresh one.
+    func panelOpened() {
+        lastOpenedAt = now()
+        isPanelOpen = true
+        if Self.isStale(age: snapshotAge, base: baseInterval) { backgroundRefresh() }
     }
 
     func poll() {
@@ -271,6 +371,7 @@ final class PanelModel: ObservableObject {
             daemonUp = false
         }
         ttsUp = voiceUp
+        lastPolledAt = now()
         clampSelection()
         onStateChange()
     }

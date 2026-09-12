@@ -55,7 +55,11 @@ struct ModelPanelRow: View {
         .disabled(!isEnabled)
         .onHover { if $0 { onHover() } }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(model.id), \(model.warm ? "warm" : "not loaded")")
+        .accessibilityLabel(
+            [model.id, model.warm ? "warm" : "not loaded", model.idleLabel]
+                .compactMap { $0 }
+                .joined(separator: ", ")
+        )
         .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
     }
 
@@ -450,8 +454,7 @@ final class MenuBarPanelController {
         let panel = self.panel ?? makePanel()
         self.panel = panel
         model.selection = 0
-        model.isPanelOpen = true
-        model.poll()
+        model.panelOpened()
 
         panel.setContentSize(panel.contentView?.fittingSize ?? NSSize(width: MenuBarPanelView.width + 32, height: 320))
         if let origin = anchorFrame(for: button, size: panel.frame.size) {

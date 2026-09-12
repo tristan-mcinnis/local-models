@@ -116,15 +116,34 @@ def cmd_list(args) -> None:
             print(f"         {model['path']}\n         {model.get('role', '')}")
 
 
+def duration(seconds: float) -> str:
+    """A rough, readable span: 45s, 12m, 2h. Detail no one reads is left off."""
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m"
+    return f"{int(seconds // 3600)}h"
+
+
+def warm_label(model: dict) -> str:
+    """A warm model and how long its backend has gone unused, when the daemon
+    reports it (an older daemon does not)."""
+    idle = model.get("idle_seconds")
+    return model["id"] if idle is None else f"{model['id']} (idle {duration(idle)})"
+
+
 def cmd_status(_args) -> None:
     data = registry()
     health = daemon(data, "/health", timeout=5)
     models = daemon(data, "/v1/models", timeout=10)
-    warm = [m["id"] for m in models.get("models", []) if m.get("warm")]
+    warm = [warm_label(m) for m in models.get("models", []) if m.get("warm")]
+    threshold = models.get("idle_unload_seconds")
     print(f"server: {health.get('status', 'unknown')}")
     print(f"endpoint: {daemon_base_url(data)}")
     print(f"loaded: {', '.join(warm) or 'none'}")
     print(f"default: {models.get('default')}")
+    if threshold is not None:
+        print(f"idle unload: {duration(threshold) if threshold else 'off'}")
     for name, status in health.get("backends", {}).items():
         state = "available" if status.get("available") else "unavailable"
         print(f"backend {name}: {state} ({status.get('detail', '')})")

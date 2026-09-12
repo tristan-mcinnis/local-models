@@ -16,6 +16,16 @@ from pathlib import Path
 DEFAULT_DAEMON_URL = "http://127.0.0.1:8078"
 DEFAULT_BACKEND = "mlx-vlm"
 
+#: Seconds a warm backend may go unused before the daemon unloads it.
+#: 30 minutes. The daemon exists to keep weights warm, so the threshold has to
+#: outlast a working session: an app polling every few minutes, a burst of
+#: completions, a coffee break, a meeting. It also has to be short enough that a
+#: model warmed once at lunchtime is not still holding ~9 GB resident the next
+#: morning, which is what actually happens without this. 30 minutes is the
+#: longest gap a person leaves inside one task and the shortest gap that means
+#: they moved on to another. 0 disables idle unloading entirely.
+DEFAULT_IDLE_UNLOAD_SECONDS = 1800.0
+
 
 class RegistryError(RuntimeError):
     """The registry is missing, unreadable, or names an unknown model."""
@@ -56,6 +66,29 @@ def model_path(model: dict) -> str:
 
 def backend_name(model: dict) -> str:
     return model.get("backend", DEFAULT_BACKEND)
+
+
+def idle_unload_seconds(registry: dict | None = None) -> float:
+    """How long a backend may sit unused before the daemon unloads it.
+
+    $LOCAL_MODELS_IDLE_UNLOAD_SECONDS, else the registry's
+    "daemon.idle_unload_seconds", else DEFAULT_IDLE_UNLOAD_SECONDS. 0 (or a
+    negative number) means never unload, which is the off switch.
+
+    An unreadable value falls back to the default rather than refusing to
+    start: a typo in the registry must not take the fleet down, and
+    `GET /v1/models` reports the threshold actually in force.
+    """
+    raw = os.environ.get("LOCAL_MODELS_IDLE_UNLOAD_SECONDS")
+    if raw is None and registry:
+        raw = registry.get("daemon", {}).get("idle_unload_seconds")
+    if raw is None or raw == "":
+        return DEFAULT_IDLE_UNLOAD_SECONDS
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_IDLE_UNLOAD_SECONDS
+    return max(0.0, value)
 
 
 def daemon_base_url(registry: dict | None = None) -> str:
