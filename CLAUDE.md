@@ -47,6 +47,10 @@ check `local-model status` before calling it done.
   daemon when it cannot be written. Adding a command means adding it to the
   manifest in the same commit. `$HOUSE_COMMANDS_DIR` redirects the write, which
   is how tests and a daemon on a spare port stay out of the real file.
+- A command that cannot finish in a second offers `{"wait": false}`: start the
+  work, reply at once, let the caller poll. The use claim is taken on the
+  request thread and released by the worker, so the sweeper cannot unload work
+  that is still loading.
 - Wire format is a contract. Success bodies are documented in the README route
   table; every error is `{"error", "hint"?}` with 400/404/501/502. Changes
   must be additive; clients (Quick Launch, screenctx, cotype, local-dictation)

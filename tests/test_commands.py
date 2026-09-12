@@ -21,6 +21,7 @@ import socket
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -275,11 +276,34 @@ class StubBackend:
         return {"message": "unloaded"}
 
 
-class DaemonTests(unittest.TestCase):
-    """The routes the manifest points at, on a real daemon on a spare port."""
+class BlockingStubBackend(StubBackend):
+    """A backend whose warm takes as long as the test wants it to, standing in
+    for a cold model: tens of seconds of loading, without a model."""
 
-    def boot(self, tmp: Path, commands_home: Path | None = None):
-        backend = StubBackend()
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.loading = threading.Event()
+        self.release = threading.Event()
+        self.unloads = 0
+
+    def warm(self, model, payload) -> dict:
+        self.loading.set()
+        if not self.release.wait(timeout=30):
+            raise AssertionError("background warm was never released")
+        return super().warm(model, payload)
+
+    def unload(self) -> dict:
+        self.unloads += 1
+        return super().unload()
+
+
+class DaemonHarness:
+    """Boots a real daemon on a spare port for the test cases below. Not a
+    TestCase itself, so its helpers are shared without its tests being run
+    twice."""
+
+    def boot(self, tmp: Path, commands_home: Path | None = None, backend=None):
+        backend = backend or StubBackend()
         serve.Handler.backend_cache = {}
         self.addCleanup(setattr, serve.Handler, "backend_cache", {})
         patch = mock.patch.object(serve, "get_backend", side_effect=lambda *a, **k: backend)
@@ -311,6 +335,9 @@ class DaemonTests(unittest.TestCase):
         data = json.loads(response.read())
         conn.close()
         return response.status, data
+
+class DaemonTests(DaemonHarness, unittest.TestCase):
+    """The routes the manifest points at, on a real daemon on a spare port."""
 
     def test_startup_publishes_the_manifest_for_the_port_it_serves(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -365,6 +392,114 @@ class DaemonTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertEqual(body["status"], "ok")
             self.assertIn("could not publish command manifest", captured.getvalue())
+
+
+class NonBlockingWarmTests(DaemonHarness, unittest.TestCase):
+    """`{"wait": false}` starts the load and returns, per the contract's rule
+    that nothing may block the caller for more than a second."""
+
+    def start_load(self, tmp: Path):
+        """Boot a daemon and leave a background warm loading. Returns the
+        server, the backend holding the load open, and the reply."""
+        backend = BlockingStubBackend()
+        self.addCleanup(backend.release.set)
+        server, backend, _ = self.boot(tmp, backend=backend)
+        began = time.monotonic()
+        status, body = self.request(
+            server.server_address[1], "POST", "/v1/warm", {"argument": "fake-vision", "wait": False}
+        )
+        self.elapsed = time.monotonic() - began
+        self.assertEqual(status, 200)
+        self.assertTrue(backend.loading.wait(timeout=10), "the load never started")
+        return server, backend, body
+
+    def drain(self, backend) -> None:
+        """Let the load finish and wait for the claim to come back."""
+        backend.release.set()
+        deadline = time.monotonic() + 10
+        while serve.USE.in_flight("mlx-vlm") and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+    def test_it_returns_while_the_model_is_still_loading(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, backend, body = self.start_load(Path(tmp))
+            self.assertLess(self.elapsed, 1.0)
+            self.assertIs(body["warmed"], False)
+            self.assertIs(body["started"], True)
+            self.assertEqual(body["model"], "fake-vision")
+            self.assertFalse(backend.release.is_set())
+            self.drain(backend)
+
+    def test_the_status_document_is_busy_while_it_loads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            server, backend, _ = self.start_load(Path(tmp))
+            _, status = self.request(server.server_address[1], "GET", "/v1/status")
+            self.assertIs(status["busy"], True)
+            self.assertEqual(status["detail"], "Working")
+            self.drain(backend)
+            _, after = self.request(server.server_address[1], "GET", "/v1/status")
+            self.assertIs(after["busy"], False)
+
+    def test_the_clock_is_stamped_from_the_moment_the_work_starts(self) -> None:
+        """Not when it finishes: a model mid-load must never read as idle."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _, backend, _ = self.start_load(Path(tmp))
+            idle, basis = serve.USE.idle_state("mlx-vlm")
+            self.assertEqual(idle, 0.0)
+            self.assertEqual(basis, "use")
+            self.assertEqual(serve.USE.in_flight("mlx-vlm"), 1)
+            self.drain(backend)
+
+    def test_the_sweeper_cannot_unload_a_model_mid_load(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, backend, _ = self.start_load(Path(tmp))
+            # The registry's other backend is idle and reclaimable, and the use
+            # tracker is the daemon's, shared by every test in this process.
+            # Drop its clock so this asserts one thing: the backend that is
+            # mid-load survives a sweep it is long past the threshold for.
+            serve.USE.forget("llama-gguf")
+            sweeper = serve.IdleSweeper(serve.Handler, 0.01, interval=3600)
+            self.assertEqual(sweeper.sweep(), [])
+            self.assertEqual(backend.unloads, 0)
+            self.assertEqual(serve.USE.in_flight("mlx-vlm"), 1)
+            self.drain(backend)
+
+    def test_the_claim_is_released_when_the_load_finishes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, backend, _ = self.start_load(Path(tmp))
+            self.drain(backend)
+            self.assertEqual(serve.USE.in_flight("mlx-vlm"), 0)
+            self.assertEqual(backend.warmed, [str(Path(tmp) / "fake-vision")])
+
+    def test_a_failed_background_load_still_gives_the_claim_back(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = StubBackend()
+            backend.warm = mock.Mock(side_effect=serve.BackendError("no weights"))
+            server, backend, captured = self.boot(Path(tmp), backend=backend)
+            _, body = self.request(server.server_address[1], "POST", "/v1/warm", {"wait": False})
+            self.assertIs(body["started"], True)
+            deadline = time.monotonic() + 10
+            while serve.USE.in_flight("mlx-vlm") and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(serve.USE.in_flight("mlx-vlm"), 0)
+            self.assertIn("background warm", captured.getvalue())
+
+    def test_waiting_is_still_the_default(self) -> None:
+        """Other apps depend on the reply they already get; this is additive."""
+        with tempfile.TemporaryDirectory() as tmp:
+            server, _, _ = self.boot(Path(tmp))
+            status, body = self.request(server.server_address[1], "POST", "/v1/warm", {})
+            self.assertEqual(status, 200)
+            self.assertIs(body["warmed"], True)
+            self.assertEqual(body["text"], "ok")
+            self.assertNotIn("started", body)
+
+    def test_a_wait_that_is_not_a_boolean_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            server, _, _ = self.boot(Path(tmp))
+            status, body = self.request(server.server_address[1], "POST", "/v1/warm", {"wait": "no"})
+            self.assertEqual(status, 400)
+            self.assertIn("wait", body["error"])
 
 
 if __name__ == "__main__":

@@ -102,7 +102,7 @@ curl -s localhost:8078/health | jq           # per-backend availability
 | `POST /v1/vision` | `{model?, prompt?, image_b64 \| image_path, mime?, max_tokens?, timeout?}` | `{model, text}` | serving (mlx-vlm) |
 | `POST /v1/ask` | `{model?, prompt, max_tokens?, timeout?}` | `{model, text}` | serving |
 | `POST /v1/complete` | `{model?, prompt, system?, max_tokens?, timeout?}` | `{model, text}` | serving (llama-gguf, ~57 ms warm first token) |
-| `POST /v1/warm` | `{model?}` | `{model, warmed, text}` | serving |
+| `POST /v1/warm` | `{model?, wait?}` | `{model, warmed, text}`, or `{model, warmed: false, started: true}` when `wait` is `false` | serving |
 | `POST /v1/unload` | `{model?}` | `{model, unloaded, message}` | serving |
 | `POST /v1/transcribe` | | | phase 2 (501) |
 | `GET /v1/status` | | `{app, ok, busy, warm, detail}` — the house command status document | serving |
@@ -194,6 +194,13 @@ already worked:
 - A command's one argument is posted as `{"argument": "<value>"}`.
   `/v1/warm` and `/v1/unload` accept it as a synonym for `model`, so the
   existing wire format is unchanged.
+- Nothing may block the caller for more than a second, and warming a cold
+  model takes tens of seconds. So `POST /v1/warm` takes `{"wait": false}`:
+  it starts the load, returns `{"warmed": false, "started": true}` at once,
+  and the caller polls `/v1/status`. The model reads as busy from the instant
+  that reply is sent, not from when the load ends, so the idle sweeper can
+  never unload a model mid-load. Omitting `wait` keeps the blocking reply
+  every existing client gets.
 - The registry changes while the daemon runs, so a choice list frozen into a
   file written at launch would go stale. The manifest names a route to read
   instead, in one field the contract does not define, `choicesFrom`.
