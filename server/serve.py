@@ -107,6 +107,12 @@ def require_prompt(payload: dict) -> str:
     return prompt
 
 
+def backend_is_warm(status: dict) -> bool:
+    """Is this backend holding a model right now? One definition, shared by the
+    model list and the sweeper, so both agree on what counts as warm."""
+    return bool(status.get("available")) and status.get("loaded_model") is not None
+
+
 class BackendUse:
     """When each backend was last used, and who is using it right now.
 
@@ -119,13 +125,21 @@ class BackendUse:
     OpenAI chat. Reading state does not count — `/health` and `/v1/models` ask
     every backend how it is doing, and if that counted as use nothing would
     ever go idle, because the menu bar polls `/v1/models` on a timer.
+
+    A backend can also be warm without this daemon ever having used it: an
+    mlx-vlm server it merely adopted, or any backend still holding weights from
+    before the daemon last restarted. That backend has no use stamp, so it also
+    needs an age of its own, which is what `observe_warm` records.
     """
 
     def __init__(self, clock=time.monotonic):
         self._clock = clock
-        # One condition (and so one lock) guards all three maps below.
+        # One condition (and so one lock) guards all four maps below.
         self._cond = threading.Condition()
         self._last_used: dict[str, float] = {}
+        # When a backend was first seen warm without having been used. The
+        # fallback age, never a substitute for a real use stamp.
+        self._warm_since: dict[str, float] = {}
         self._in_flight: dict[str, int] = {}
         self._unloading: set[str] = set()
 
@@ -149,14 +163,56 @@ class BackendUse:
                 self._last_used[name] = self._clock()
                 self._cond.notify_all()
 
-    def idle_seconds(self, name: str) -> float | None:
-        """Seconds since `name` last finished work, 0.0 while it is working,
-        None when it has done none since it was started or last unloaded."""
+    def observe_warm(self, name: str, warm: bool) -> None:
+        """Record whether `name` is holding a model right now.
+
+        The first time a backend is seen warm with no use behind it, the moment
+        of that sighting becomes its idle clock, and it ages from there. This is
+        the honest reading of "we do not know when this was last wanted": it is
+        not stamped as used just now, which would make it immortal, and it is
+        not unloaded on sight, which would throw away a model warmed seconds
+        before the daemon restarted. Seeing it warm again changes nothing — the
+        age keeps running from the first sighting. Seeing it cold drops the
+        observation, because there is no longer anything resident to age.
+
+        Observing is not using: this never touches the use stamp, so the menu
+        bar's polling still cannot keep a model warm.
+        """
+        with self._cond:
+            if not warm:
+                self._warm_since.pop(name, None)
+            elif name not in self._warm_since:
+                self._warm_since[name] = self._clock()
+
+    def _since(self, name: str) -> float | None:
+        """The instant `name`'s idle clock runs from, under the caller's lock:
+        its last use, else when it was first seen warm, else nothing."""
+        last = self._last_used.get(name)
+        if last is not None:
+            return last
+        return self._warm_since.get(name)
+
+    def idle_state(self, name: str) -> tuple[float | None, str | None]:
+        """`(idle_seconds, basis)`: how long `name` has been idle and where that
+        number comes from — "use" for work it did, "observed-warm" for a backend
+        found warm with no use behind it, and `(None, None)` when it is neither.
+        """
         with self._cond:
             if self._in_flight.get(name, 0):
-                return 0.0
+                return 0.0, "use"
             last = self._last_used.get(name)
-            return None if last is None else max(0.0, self._clock() - last)
+            if last is not None:
+                return max(0.0, self._clock() - last), "use"
+            seen = self._warm_since.get(name)
+            if seen is not None:
+                return max(0.0, self._clock() - seen), "observed-warm"
+            return None, None
+
+    def idle_seconds(self, name: str) -> float | None:
+        """Seconds since `name` last finished work, 0.0 while it is working,
+        falling back to how long it has been seen warm. None when it has done no
+        work and has never been seen holding a model."""
+        return self.idle_state(name)[0]
 
     def in_flight(self, name: str) -> int:
         with self._cond:
@@ -166,6 +222,7 @@ class BackendUse:
         """Drop `name`'s idle clock: an unloaded backend has nothing to age."""
         with self._cond:
             self._last_used.pop(name, None)
+            self._warm_since.pop(name, None)
 
     @contextlib.contextmanager
     def unload_claim(self, name: str, min_idle: float | None = None, wait: float = 0.0):
@@ -175,8 +232,10 @@ class BackendUse:
         against a backend that is being torn down, and a request already in
         flight is waited out: the claim is only granted once the in-flight
         count is zero. `min_idle` is the sweeper's extra condition — idle at
-        least that long, and never granted to a backend with no idle clock at
-        all. `wait` is how long to wait for in-flight requests to drain; the
+        least that long, counted from the backend's last use or, failing that,
+        from when it was first seen warm, and never granted to a backend with no
+        idle clock at all. `wait` is how long to wait for in-flight requests to
+        drain; the
         sweeper passes 0 and simply tries again on its next tick.
         """
         granted = False
@@ -188,9 +247,9 @@ class BackendUse:
                     break
                 self._cond.wait(timeout=remaining)
             if not self._in_flight.get(name, 0) and name not in self._unloading:
-                last = self._last_used.get(name)
+                since = self._since(name)
                 idle_enough = min_idle is None or (
-                    last is not None and self._clock() - last >= min_idle
+                    since is not None and self._clock() - since >= min_idle
                 )
                 if idle_enough:
                     self._unloading.add(name)
@@ -202,6 +261,7 @@ class BackendUse:
                 with self._cond:
                     self._unloading.discard(name)
                     self._last_used.pop(name, None)
+                    self._warm_since.pop(name, None)
                     self._cond.notify_all()
 
 
@@ -214,8 +274,17 @@ class IdleSweeper(threading.Thread):
 
     Warm weights are the point of this daemon, but a model warmed once and then
     forgotten holds its resident memory until someone remembers to unload it —
-    in practice, for days. This walks the backends the daemon has built and
-    unloads any whose last use is older than the threshold.
+    in practice, for days. This walks every backend that could be holding one
+    and unloads any whose idle clock is older than the threshold.
+
+    "Could be holding one" is wider than "the daemon built it". A model can be
+    warm inside a server the daemon only adopted, and any model stays warm
+    across a daemon restart, which resets every use stamp. Both are the same
+    case from here: warm, with nothing recorded against it. Each tick asks every
+    candidate backend whether it is warm and records the answer, so a backend
+    like that ages from the first tick that saw it and becomes claimable one
+    threshold later. An adopted server is unloaded through its own `/unload`;
+    the server process itself is never touched.
 
     It can never unload a backend out from under a request: the claim it takes
     is the same one `BackendUse.using()` waits on, and it is granted only when
@@ -247,7 +316,11 @@ class IdleSweeper(threading.Thread):
         if not self.enabled:
             return []
         unloaded = []
-        for name in list(self.handler.backend_cache):
+        for name in self.handler.sweep_candidates():
+            self.use.observe_warm(name, backend_is_warm(self.handler.backend_status(name)))
+            if self.use.idle_seconds(name) is None:
+                # Cold, and nothing recorded against it: nothing to reclaim.
+                continue
             with self.use.unload_claim(name, min_idle=self.threshold) as granted:
                 if not granted:
                     continue
@@ -280,6 +353,20 @@ class Handler(BaseHTTPRequestHandler):
         if name not in cls.backend_cache:
             cls.backend_cache[name] = get_backend(name, cls.registry)
         return cls.backend_cache[name]
+
+    @classmethod
+    def sweep_candidates(cls) -> list[str]:
+        """Every backend that could be holding a model: the ones this daemon has
+        built, plus every backend a registered model names. The second half is
+        the adopted case — a vision server started by launchd is warm without
+        this daemon ever building its backend, so the cache alone would miss it.
+        """
+        names = list(cls.backend_cache)
+        for model in cls.registry.get("models", {}).values():
+            name = backend_name(model)
+            if name not in names:
+                names.append(name)
+        return names
 
     @classmethod
     def backend_status(cls, name: str) -> dict:
@@ -358,9 +445,12 @@ class Handler(BaseHTTPRequestHandler):
 
         `idle_seconds` is a property of the backend, not of the model: two
         models on one backend report the same number, because one unload frees
-        both. It is null when the backend has done no work since the daemon
-        started or since it was last unloaded. Listing is not use, so calling
-        this never keeps a model warm.
+        both. It counts from the backend's last piece of work, or — for a
+        backend found warm with no work behind it, such as an adopted server or
+        one still warm from before a daemon restart — from when the daemon first
+        saw it warm. `idle_basis` says which of the two it is, and both are null
+        only for a backend that is cold and unused. Listing is not use, so
+        calling this never keeps a model warm.
         """
         out = []
         status_cache: dict[str, dict] = {}
@@ -368,13 +458,17 @@ class Handler(BaseHTTPRequestHandler):
             name = backend_name(model)
             if name not in status_cache:
                 status_cache[name] = self.backend_status(name)
+                # Seeing a backend warm is not use, but it does start its clock:
+                # a backend warm with nothing recorded against it would
+                # otherwise report null forever and never age.
+                USE.observe_warm(name, backend_is_warm(status_cache[name]))
             status = status_cache[name]
             resolved_path = model_path(model)
             try:
                 endpoint = self.backend(name).base_url
             except BackendError:
                 endpoint = None
-            idle = USE.idle_seconds(name)
+            idle, idle_basis = USE.idle_state(name)
             out.append(
                 {
                     "id": key,
@@ -385,6 +479,7 @@ class Handler(BaseHTTPRequestHandler):
                     "backend_available": status.get("available", False),
                     "endpoint": endpoint,
                     "idle_seconds": None if idle is None else round(idle, 1),
+                    "idle_basis": idle_basis,
                     "in_flight": USE.in_flight(name),
                 }
             )
