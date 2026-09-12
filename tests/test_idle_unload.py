@@ -10,6 +10,7 @@ from __future__ import annotations
 import http.client
 import importlib.util
 import json
+import os
 import socket
 import sys
 import tempfile
@@ -671,6 +672,15 @@ class DaemonIdleTests(unittest.TestCase):
 
 class SweeperStartupTests(unittest.TestCase):
     """make_server attaches the sweeper and honours the off switch."""
+
+    def setUp(self):
+        # Starting a daemon publishes a command manifest; keep it in a temp
+        # directory rather than over the real one.
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        patch = mock.patch.dict(os.environ, {"HOUSE_COMMANDS_DIR": home.name})
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def _args(self, tmp: Path, threshold):
         import argparse

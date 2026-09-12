@@ -14,6 +14,7 @@ import http.client
 import importlib.util
 import io
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -109,6 +110,16 @@ def get_health(port: int):
 
 
 class StartupDegradationTests(unittest.TestCase):
+    def setUp(self):
+        """Point the house command manifest at a temp directory: starting a
+        daemon publishes one, and a test must never write over the manifest of
+        the daemon a person is using."""
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        patch = mock.patch.dict(os.environ, {"HOUSE_COMMANDS_DIR": home.name})
+        patch.start()
+        self.addCleanup(patch.stop)
+
     def _boot(self, reg_path, fake_backend):
         """Build and serve a daemon with a faked vision backend.
 

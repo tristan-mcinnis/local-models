@@ -105,6 +105,8 @@ curl -s localhost:8078/health | jq           # per-backend availability
 | `POST /v1/warm` | `{model?}` | `{model, warmed, text}` | serving |
 | `POST /v1/unload` | `{model?}` | `{model, unloaded, message}` | serving |
 | `POST /v1/transcribe` | | | phase 2 (501) |
+| `GET /v1/status` | | `{app, ok, busy, warm, detail}` — the house command status document | serving |
+| `GET /v1/choices/model` | | `{choices: [{id, title, detail}]}` — what a house command can be pointed at | serving |
 | `GET /v1/openai/models` | | OpenAI list: `{object: "list", data: [{id, object: "model", owned_by}]}` (ids + aliases) | serving |
 | `POST /v1/chat/completions` | OpenAI chat body; `model` = registry id or alias (omit for default) | the backend's OpenAI reply relayed byte-for-byte, streaming (`text/event-stream`) or JSON; header `X-Local-Models-Model` carries the resolved id | serving (mlx-vlm and llama-gguf) |
 
@@ -169,6 +171,36 @@ the registry. TTS, embeddings, and reranking are the obvious next files. See
 
 A minimal Swift client for native apps ships in
 [client/swift/LocalModelClient](client/swift/LocalModelClient).
+
+## House commands
+
+The daemon publishes what it lets other apps do, so Quick Launch can warm or
+unload a model from its launcher without knowing this daemon by name. At
+startup it writes
+
+    ~/Library/Application Support/House/commands/models.json
+
+per the house command contract (`design-system/docs/app-commands.md`):
+transport `http`, endpoint the address it is actually serving on, and two
+commands — **Warm Model** and **Unload Model**, each taking a model id.
+Nothing destructive is published. A manifest that cannot be written is logged
+and ignored; the daemon serves either way.
+
+The contract fixes the file and the status document but leaves the `http`
+transport's own details open, so this daemon settles them the way its routes
+already worked:
+
+- A command is `POST {endpoint}{verb}`; `status` and `choicesFrom` are `GET`.
+- A command's one argument is posted as `{"argument": "<value>"}`.
+  `/v1/warm` and `/v1/unload` accept it as a synonym for `model`, so the
+  existing wire format is unchanged.
+- The registry changes while the daemon runs, so a choice list frozen into a
+  file written at launch would go stale. The manifest names a route to read
+  instead, in one field the contract does not define, `choicesFrom`.
+
+`GET /v1/status` is derived from the same per-model state `GET /v1/models`
+reports — one source of truth — and, like that route, reading it is not use, so
+polling it never keeps a model warm.
 
 ## Menu bar
 
