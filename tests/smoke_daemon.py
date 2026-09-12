@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -48,6 +49,10 @@ def main() -> None:
             [sys.executable, str(REPO / "server" / "serve.py"), "--port", str(port), "--registry", str(home / "models.json")],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            # The daemon publishes its house command manifest at startup; this
+            # one is a smoke instance on a spare port, so it publishes into the
+            # temp home and leaves the real manifest alone.
+            env={**os.environ, "HOUSE_COMMANDS_DIR": str(home / "commands")},
         )
         try:
             base = f"http://127.0.0.1:{port}"

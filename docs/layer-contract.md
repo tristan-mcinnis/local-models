@@ -94,6 +94,21 @@ loopback-only server per port.
 
 A backend that cannot meet its budget warm does not graduate to "serving".
 
+## Commanded from outside
+
+The daemon is one of the house apps, so it publishes what it can be asked to
+do: `server/commands.py` writes a manifest to
+`~/Library/Application Support/House/commands/models.json` at startup, naming
+the `http` transport, the address being served, the status route, and the two
+safe commands (warm a model, unload a model). The contract is
+`design-system/docs/app-commands.md`; the README's "House commands" section
+records the three `http` details that contract leaves open.
+
+Two rules hold here as everywhere: the status document is derived from the same
+model state `/v1/models` reports, never a second source of truth, and a
+manifest that cannot be written is logged and ignored. Remote control is an
+extra; losing it never costs the serving.
+
 ## Extending
 
 New capability = one backend file + registry entries + (optionally) a client

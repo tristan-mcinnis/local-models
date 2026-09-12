@@ -6,10 +6,12 @@ pluggable backends, and reports which models are warm.
 
   GET  /health          daemon liveness + per-backend availability
   GET  /v1/models       registry with live warm/loaded state
+  GET  /v1/status       house command status document (app, ok, busy, warm, detail)
+  GET  /v1/choices/model  the model ids a house command can be pointed at
   POST /v1/vision       {"model"?, "prompt"?, "image_b64"|"image_path", "mime"?, "max_tokens"?, "timeout"?}
   POST /v1/ask          {"model"?, "prompt", "max_tokens"?, "timeout"?}
   POST /v1/complete     {"model"?, "prompt", "system"?, "max_tokens"?, "timeout"?}
-  POST /v1/warm         {"model"?}  load a model and keep it warm
+  POST /v1/warm         {"model"?, "wait"?}  load a model and keep it warm
   POST /v1/unload       {"model"?}  unload the backend that owns that model
   POST /v1/transcribe   planned (501)
 
@@ -57,6 +59,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import commands  # noqa: E402
 from backends import BackendError, NotSupported, all_backends, get_backend, status_dict  # noqa: E402
 from common import (  # noqa: E402
     DEFAULT_DAEMON_URL,
@@ -98,6 +101,31 @@ def image_content(payload: dict, prompt: str) -> list[dict]:
         {"type": "image_url", "image_url": {"url": data_url}},
         {"type": "text", "text": prompt},
     ]
+
+
+def command_model(payload: dict) -> str | None:
+    """The model a warm/unload call names.
+
+    `model` is this daemon's own field. `argument` is the house command
+    contract's: one command, one argument, whatever the app calls it. Accepting
+    both keeps Quick Launch free of any knowledge of this API's field names
+    without changing the wire format anyone already depends on.
+    """
+    return payload.get("model") or payload.get("argument")
+
+
+def wait_requested(payload: dict) -> bool:
+    """Whether the caller wants to wait for the work. Default: yes, as before.
+
+    `{"wait": false}` is the house command contract's non-blocking form: start
+    the work and return at once, and let the caller poll the status document.
+    Anything that cannot finish inside a second has to offer it, and warming a
+    cold model takes tens of seconds.
+    """
+    wait = payload.get("wait", True)
+    if not isinstance(wait, bool):
+        raise ValueError("wait must be true or false")
+    return wait
 
 
 def require_prompt(payload: dict) -> str:
@@ -143,25 +171,39 @@ class BackendUse:
         self._in_flight: dict[str, int] = {}
         self._unloading: set[str] = set()
 
-    @contextlib.contextmanager
-    def using(self, name: str):
-        """Hold `name` in use for one request: stamp the clock, count it in
-        flight, and wait out any unload already running so the request never
-        talks to a backend that is being torn down."""
+    def begin(self, name: str) -> None:
+        """Start using `name`: wait out any unload already running so the work
+        never talks to a backend being torn down, count it in flight, and stamp
+        the clock. Always paired with `end`.
+
+        Separate from `using()` because work can outlive the request that asked
+        for it: a non-blocking warm claims the backend on the request thread,
+        before the caller is told it started, and releases it from the thread
+        doing the loading.
+        """
         with self._cond:
             while name in self._unloading:
                 self._cond.wait()
             self._in_flight[name] = self._in_flight.get(name, 0) + 1
             self._last_used[name] = self._clock()
+
+    def end(self, name: str) -> None:
+        """Finish one use of `name`, stamping the clock again on the way out: a
+        three-minute vision call is use for its whole length, not just for the
+        instant it started."""
+        with self._cond:
+            self._in_flight[name] = max(0, self._in_flight.get(name, 0) - 1)
+            self._last_used[name] = self._clock()
+            self._cond.notify_all()
+
+    @contextlib.contextmanager
+    def using(self, name: str):
+        """Hold `name` in use for the length of one block."""
+        self.begin(name)
         try:
             yield
         finally:
-            with self._cond:
-                self._in_flight[name] = max(0, self._in_flight.get(name, 0) - 1)
-                # Stamp again on the way out: a three-minute vision call is use
-                # for its whole length, not just for the instant it started.
-                self._last_used[name] = self._clock()
-                self._cond.notify_all()
+            self.end(name)
 
     def observe_warm(self, name: str, warm: bool) -> None:
         """Record whether `name` is holding a model right now.
@@ -432,6 +474,8 @@ class Handler(BaseHTTPRequestHandler):
             {
                 "/health": self.get_health,
                 "/v1/models": self.get_models,
+                "/v1/status": self.get_status,
+                commands.CHOICES_ROUTE: self.get_model_choices,
                 "/v1/openai/models": self.get_openai_models,
             }
         )
@@ -440,7 +484,7 @@ class Handler(BaseHTTPRequestHandler):
         backends = {name: self.backend_status(name) for name in all_backends()}
         self._send(200, {"status": "ok", "service": "local-models", "backends": backends})
 
-    def get_models(self) -> None:
+    def model_states(self) -> list[dict]:
         """Every registered model with its live warm state and idle clock.
 
         `idle_seconds` is a property of the backend, not of the model: two
@@ -483,14 +527,31 @@ class Handler(BaseHTTPRequestHandler):
                     "in_flight": USE.in_flight(name),
                 }
             )
+        return out
+
+    def get_models(self) -> None:
         self._send(
             200,
             {
                 "default": self.registry.get("default"),
                 "idle_unload_seconds": idle_unload_seconds(self.registry),
-                "models": out,
+                "models": self.model_states(),
             },
         )
+
+    def get_status(self) -> None:
+        """The house command contract's status document, so Quick Launch can
+        keep a command row honest (see `server/commands.py`). Derived from the
+        same model state `/v1/models` reports — one source of truth — and, like
+        that route, reading it is not use, so polling it never keeps a model
+        warm."""
+        self._send(200, commands.status_document(self.model_states()))
+
+    def get_model_choices(self) -> None:
+        """What a `needs: "choice"` command can be pointed at right now. The
+        registry changes under a running daemon, so the manifest names this
+        route instead of freezing a list at launch."""
+        self._send(200, {"choices": commands.model_choices(self.model_states())})
 
     def get_openai_models(self) -> None:
         """OpenAI `GET /v1/models` shape: ids plus aliases of every model whose
@@ -552,15 +613,51 @@ class Handler(BaseHTTPRequestHandler):
 
     def post_warm(self) -> None:
         payload = self._payload()
-        key, model = resolve_model(self.registry, payload.get("model"))
+        key, model = resolve_model(self.registry, command_model(payload))
         name = backend_name(model)
-        with USE.using(name):
-            result = self.backend(name).warm(model, payload)
-        self._send(200, {"model": key, "warmed": True, "text": result["text"]})
+        # Neither field is a backend's business: one is this route's, one is the
+        # house command contract's.
+        warm_payload = {k: v for k, v in payload.items() if k not in ("wait", "argument")}
+        if wait_requested(payload):
+            with USE.using(name):
+                result = self.backend(name).warm(model, warm_payload)
+            self._send(200, {"model": key, "warmed": True, "text": result["text"]})
+            return
+        # Non-blocking: the claim is taken here, on the request thread, so that
+        # from the instant the caller is told the work started the backend
+        # already reads as busy and the sweeper cannot unload a model mid-load.
+        USE.begin(name)
+        started = False
+        try:
+            backend = self.backend(name)
+            threading.Thread(
+                target=self._warm_in_background,
+                args=(name, backend, model, warm_payload),
+                name=f"warm-{key}",
+                daemon=True,
+            ).start()
+            started = True
+        finally:
+            if not started:
+                # Never built, never started: hand the claim straight back.
+                USE.end(name)
+        self._send(200, {"model": key, "warmed": False, "started": True})
+
+    @staticmethod
+    def _warm_in_background(name: str, backend, model: dict, payload: dict) -> None:
+        """Load the model on a claim the request thread already took, and give
+        it back however the load ends. There is nobody to answer, so a failure
+        is logged; the caller polls the status document either way."""
+        try:
+            backend.warm(model, payload)
+        except Exception as exc:  # noqa: BLE001 - nothing to answer, only to log
+            print(f"background warm of {name} failed: {exc}", file=sys.stderr, flush=True)
+        finally:
+            USE.end(name)
 
     def post_unload(self) -> None:
         payload = self._payload()
-        key, model = resolve_model(self.registry, payload.get("model"))
+        key, model = resolve_model(self.registry, command_model(payload))
         name = backend_name(model)
         # An explicit unload is what the user asked for, so it never refuses on
         # a busy backend: it waits a bounded time for in-flight requests to
@@ -632,7 +729,9 @@ def make_server(args) -> ThreadingHTTPServer:
     A failed vision ensure (e.g. a launchd-managed server that never came up)
     is a warning, not a fatal startup error: the daemon still binds and serves
     degraded — vision calls return 502 until the backend is available — instead
-    of killing the whole process.
+    of killing the whole process. Publishing the house command manifest is the
+    same kind of extra: it is written once the port is known, and a write that
+    fails is logged and ignored.
     """
     try:
         Handler.registry = load_registry(args.registry)
@@ -660,6 +759,8 @@ def make_server(args) -> ThreadingHTTPServer:
         )
     else:
         print("idle unload disabled (threshold 0)", file=sys.stderr, flush=True)
+    # After the bind, so the manifest publishes the port actually being served.
+    commands.write_manifest(f"http://127.0.0.1:{server.server_address[1]}")
     return server
 
 

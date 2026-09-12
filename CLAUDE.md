@@ -10,7 +10,8 @@ the daemon owns the weights, the loading, and the memory. Thin clients only.
 ## Layout
 
 - `server/serve.py`: the daemon (127.0.0.1:8078). `server/common.py`: shared
-  registry/HTTP plumbing everything imports. `server/backends/`: one plugin
+  registry/HTTP plumbing everything imports. `server/commands.py`: the house
+  command manifest it publishes at startup. `server/backends/`: one plugin
   per runtime (`mlx-vlm` vision, `llama-gguf` completion, `mlx-audio-stt`
   planned).
 - `cli/local-model`, `cli/local-image`: on PATH via `make install`. They call
@@ -40,6 +41,16 @@ check `local-model status` before calling it done.
 
 - One mechanism each: registry reading, model resolution, daemon URL, and
   HTTP live in `server/common.py`. Do not re-implement them in a CLI or test.
+- The house command manifest (`server/commands.py`, contract
+  `design-system/docs/app-commands.md`) is derived from the same model state
+  `/v1/models` reports, publishes nothing destructive, and never stops the
+  daemon when it cannot be written. Adding a command means adding it to the
+  manifest in the same commit. `$HOUSE_COMMANDS_DIR` redirects the write, which
+  is how tests and a daemon on a spare port stay out of the real file.
+- A command that cannot finish in a second offers `{"wait": false}`: start the
+  work, reply at once, let the caller poll. The use claim is taken on the
+  request thread and released by the worker, so the sweeper cannot unload work
+  that is still loading.
 - Wire format is a contract. Success bodies are documented in the README route
   table; every error is `{"error", "hint"?}` with 400/404/501/502. Changes
   must be additive; clients (Quick Launch, screenctx, cotype, local-dictation)
