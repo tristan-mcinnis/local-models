@@ -37,7 +37,8 @@ until then. Completion serves (daemon-managed llama-server).
 ```bash
 git clone https://github.com/tristan-mcinnis/local-models.git
 cd local-models
-make install          # symlinks local-model + local-image onto PATH,
+make install          # copies cli/ + server/ to ~/.local/lib/local-models,
+                      # links local-model + local-image onto PATH, and
                       # seeds ~/Models/models.json from the example if absent
 make install-server   # launchd agent for the daemon (port 8078); the CLIs need it
 ```

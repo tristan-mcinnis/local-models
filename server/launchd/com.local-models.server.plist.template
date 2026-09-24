@@ -7,7 +7,7 @@
   <key>ProgramArguments</key>
   <array>
     <string>__PYTHON__</string>
-    <string>__REPO__/server/serve.py</string>
+    <string>__LIB__/server/serve.py</string>
     <string>--ensure-vision</string>
   </array>
   <key>RunAtLoad</key>

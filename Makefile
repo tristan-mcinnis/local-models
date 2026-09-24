@@ -1,26 +1,33 @@
 REPO := $(shell pwd)
 BIN  := $(HOME)/.local/bin
-PYTHON := $(shell which python3)
+# Installed runtime. launchd jobs (the daemon, and cos/Ledger calling the CLIs)
+# may not read ~/Documents, so they run this copy, never the checkout.
+LIB  := $(HOME)/.local/lib/local-models
+PYTHON ?= $(shell which python3)
 
 .PHONY: install install-server menubar install-menubar uninstall status restart logs test
 
-## Symlink the CLIs onto PATH and seed the registry if none exists.
+## Copy cli/ and server/ to $(LIB), link the CLIs onto PATH, and seed the
+## registry if none exists. Rerun after every change to cli/ or server/.
 install:
-	mkdir -p $(BIN)
-	ln -sf $(REPO)/cli/local-model $(BIN)/local-model
-	ln -sf $(REPO)/cli/local-image $(BIN)/local-image
+	mkdir -p $(BIN) $(LIB)
+	rsync -a --delete --exclude __pycache__ cli server $(LIB)/
+	git describe --always --dirty > $(LIB)/SOURCE_COMMIT
+	ln -sf $(LIB)/cli/local-model $(BIN)/local-model
+	ln -sf $(LIB)/cli/local-image $(BIN)/local-image
 	@test -f $(HOME)/Models/models.json || \
 		(mkdir -p $(HOME)/Models && cp $(REPO)/registry/models.example.json $(HOME)/Models/models.json && \
 		 echo "seeded ~/Models/models.json from the example — edit paths before use")
-	@echo "installed: local-model, local-image -> $(BIN)"
+	@echo "installed: $(LIB) ($$(cat $(LIB)/SOURCE_COMMIT)); local-model, local-image -> $(BIN)"
 
-## Render + load the daemon launchd agent (separate, deliberate act).
-install-server:
-	sed -e 's|__REPO__|$(REPO)|g' -e 's|__PYTHON__|$(PYTHON)|g' -e 's|__HOME__|$(HOME)|g' \
+## Render + load the daemon launchd agent on the installed copy (separate,
+## deliberate act). Pass PYTHON= to keep the interpreter that has mlx-vlm.
+install-server: install
+	sed -e 's|__LIB__|$(LIB)|g' -e 's|__PYTHON__|$(PYTHON)|g' -e 's|__HOME__|$(HOME)|g' \
 		server/launchd/com.local-models.server.plist.template \
 		> $(HOME)/Library/LaunchAgents/com.local-models.server.plist
-	launchctl unload $(HOME)/Library/LaunchAgents/com.local-models.server.plist 2>/dev/null || true
-	launchctl load $(HOME)/Library/LaunchAgents/com.local-models.server.plist
+	launchctl bootout gui/$$(id -u)/com.local-models.server 2>/dev/null || true
+	launchctl bootstrap gui/$$(id -u) $(HOME)/Library/LaunchAgents/com.local-models.server.plist
 	@echo "loaded: com.local-models.server (port 8078)"
 
 ## Build the menu-bar app bundle into dist/.
@@ -42,7 +49,8 @@ install-menubar: menubar
 
 uninstall:
 	rm -f $(BIN)/local-model $(BIN)/local-image
-	launchctl unload $(HOME)/Library/LaunchAgents/com.local-models.server.plist 2>/dev/null || true
+	launchctl bootout gui/$$(id -u)/com.local-models.server 2>/dev/null || true
+	rm -rf $(LIB)
 	rm -f $(HOME)/Library/LaunchAgents/com.local-models.server.plist
 	rm -rf "/Applications/Local Models.app"
 
@@ -50,6 +58,7 @@ status:
 	@curl -s -m 3 http://127.0.0.1:8078/health || echo "daemon not running (make install-server)"
 	@local-model status 2>/dev/null || true
 
+## Picks up code changes only after `make install`.
 restart:
 	launchctl kickstart -k gui/$$(id -u)/com.local-models.server
 

@@ -16,6 +16,9 @@ the daemon owns the weights, the loading, and the memory. Thin clients only.
   planned).
 - `cli/local-model`, `cli/local-image`: on PATH via `make install`. They call
   the daemon; they never call a backend port.
+- `make install` copies `cli/` and `server/` to `~/.local/lib/local-models`
+  (commit in `SOURCE_COMMIT`); the PATH links and the launchd daemon run that
+  copy, because launchd jobs may not read `~/Documents`.
 - `client/swift/LocalModelClient`: Swift client. `menubar/LocalModelsBar`:
   menu-bar app. `registry/models.example.json`: registry shape.
 - `~/Models/models.json` (outside git) is the live registry; `~/Models/` holds
@@ -34,8 +37,9 @@ make install-server / make restart / make logs
 ```
 
 Run `make test` after any Python change. Run both Swift builds after any
-Swift change. Restart the daemon (`make restart`) after a server change and
-check `local-model status` before calling it done.
+Swift change. After a server or CLI change run `make install && make restart`
+(restart alone reruns the old installed copy) and check `local-model status`
+before calling it done.
 
 ## Rules
 
