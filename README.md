@@ -17,20 +17,23 @@ and the memory. Adding a sixth app costs a client call, not a model integration.
 
 ```
 ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐
-│  launcher   │ │ autocomplete│ │  dictation  │ │ agent/CLI   │   thin clients
+│  launcher   │ │ autocomplete│ │ screen ctx  │ │ agent/CLI   │   thin clients
 └──────┬──────┘ └──────┬──────┘ └──────┬──────┘ └──────┬──────┘
        └───────────────┴───────┬───────┴───────────────┘
                        127.0.0.1:8078  (never the network)
                     ┌───────────┴───────────┐
                     │   local-models daemon │  warm models, one copy
-                    │  vision · completion* │
+                    │  vision · completion  │
                     │     transcription*    │
                     └───────────┬───────────┘
                         ~/Models/ registry + weights
 ```
 
 \* transcription is phase 2; its endpoint exists and returns an honest 501
-until then. Completion serves (daemon-managed llama-server).
+until then. Completion serves (daemon-managed llama-server). Dictation is not a
+client yet: Local Dictation runs its own models in process, for latency, and
+shares only the `~/Models/` weight store; the daemon does no dictation inference
+until transcription ships.
 
 ## Install
 
@@ -170,8 +173,13 @@ and stops it. Thinking is disabled at spawn (`enable_thinking: false`) so
 completion models return raw continuation tokens, never reasoning.
 
 Backends are plugins: subclass `Backend`, declare capabilities, add one line to
-the registry. TTS, embeddings, and reranking are the obvious next files. See
+the registry. Embeddings and reranking are the obvious next files. See
 [docs/layer-contract.md](docs/layer-contract.md).
+
+TTS is already served, but not by this daemon: local-tts runs its own service on
+`127.0.0.1:8081` (OpenAI-compatible `/v1/audio/speech`), registered in
+`~/Models/models.json` as `pocket-tts`. The daemon does not proxy it; its row in
+`/v1/models` reads `backend_available: false`, and clients call 8081 directly.
 
 A minimal Swift client for native apps ships in
 [client/swift/LocalModelClient](client/swift/LocalModelClient).
@@ -221,6 +229,11 @@ A menu-bar app shows the fleet at a glance on the house design system
 row per registered model with its capabilities and whether it is warm, Return
 to load and ⌘Return to unload, then Refresh (⌘R) and Open registry. It talks
 only to the daemon and to the daemon's launchd job.
+
+The menu bar is the daemon's face, not its owner: the daemon holds the
+registry, the weights, and every load and unload, and the panel only asks it.
+It is not Usage either: Local Models shows which models on this Mac are warm,
+while Usage shows how much quota the hosted, metered AI services have left.
 
 ```bash
 make menubar           # builds dist/Local Models.app

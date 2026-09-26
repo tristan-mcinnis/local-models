@@ -57,8 +57,9 @@ before calling it done.
   that is still loading.
 - Wire format is a contract. Success bodies are documented in the README route
   table; every error is `{"error", "hint"?}` with 400/404/501/502. Changes
-  must be additive; clients (Quick Launch, screenctx, cotype, local-dictation)
-  depend on it.
+  must be additive; clients (Quick Launch, screenctx, cotype, rti vision,
+  chief-of-staff's `/v1/ask` fallback) depend on it. Local Dictation is not a
+  client: it runs its models in process and shares only `~/Models/`.
 - OpenAI passthrough: `POST /v1/chat/completions` and `GET /v1/openai/models`
   let OpenAI-shaped clients target the daemon instead of a backend port. The
   daemon resolves the registry id, calls `backend.prepare(model)`, rewrites
