@@ -130,6 +130,15 @@ Every error is `{"error": "<message>"}` plus an optional `"hint"`:
 502 backend unreachable or failed. `model` accepts an id or an alias; omit it
 for the registry default.
 
+The mlx-vlm server answers nothing, not even `/health`, while it generates. So
+a vision server that takes the connection but does not answer is read as busy,
+not down: a second concurrent call queues behind the first instead of getting
+a 502. The cost is that a truly hung server is indistinguishable from a busy
+one, so a call to it fails at its own `timeout` (default 180 s on `/v1/vision`
+and `/v1/ask`, 600 s on `/v1/chat/completions`),
+not at once. Pass a shorter `timeout` if the caller cannot wait. A refused
+connection is still a 502 at once.
+
 ### Idle unloading
 
 A model warmed once and then forgotten holds its resident memory until someone
