@@ -647,6 +647,44 @@ class DaemonIdleTests(unittest.TestCase):
         _, data = self.http("GET", "/v1/models")
         self.assertTrue(data["models"][0]["warm"])
 
+    def test_listing_does_not_wait_behind_a_busy_backend(self):
+        """The mlx-vlm server answers /health only between generations. The
+        model list used to wait on that probe for its whole timeout, so the
+        menu bar hung up and showed the daemon as down during every vision
+        call. A backend with work in flight reports its last status instead."""
+        self.assertEqual(self.http("POST", "/v1/warm", {})[0], 200)
+        self.assertEqual(self.http("GET", "/v1/models")[0], 200)  # a live report
+        self.backend.release_infer.clear()
+        real_status = self.backend.status
+
+        def stalled_status():
+            # Like the real server: no answer until the generation ends.
+            if self.backend.infer_started.is_set():
+                self.backend.release_infer.wait(timeout=10)
+            return real_status()
+
+        self.backend.status = stalled_status
+        result: dict = {}
+
+        def call():
+            result["status"], _ = self.http("POST", "/v1/ask", {"prompt": "hi"})
+
+        caller = threading.Thread(target=call, daemon=True)
+        caller.start()
+        self.assertTrue(self.backend.infer_started.wait(timeout=5))
+        try:
+            started = time.monotonic()
+            status, data = self.http("GET", "/v1/models")
+            elapsed = time.monotonic() - started
+            self.assertEqual(status, 200)
+            self.assertLess(elapsed, 1.0)
+            self.assertTrue(data["models"][0]["warm"])
+            self.assertEqual(data["models"][0]["in_flight"], 1)
+        finally:
+            self.backend.release_infer.set()
+            caller.join(timeout=10)
+        self.assertEqual(result["status"], 200)
+
     def test_a_request_in_flight_is_never_unloaded_from_under(self):
         self.assertEqual(self.http("POST", "/v1/warm", {})[0], 200)
         self.clock.advance(100_000)

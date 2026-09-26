@@ -446,12 +446,33 @@ class Handler(BaseHTTPRequestHandler):
                 names.append(name)
         return names
 
+    #: The last status each backend reported, with the instance it came from.
+    _last_status: dict = {}
+
     @classmethod
     def backend_status(cls, name: str) -> dict:
+        """What `name` reports about itself, without waiting behind its work.
+
+        The mlx-vlm server generates on its event loop, so its `/health` does
+        not answer until a running vision call ends. Asking it then held
+        `/v1/models` and `/health` for the whole probe timeout, and the menu
+        bar (3 s) and other pollers hung up and read the daemon as down. While
+        this daemon has work in flight on a backend, that backend is plainly
+        up, so its last report stands in for a live probe.
+        """
         try:
-            return cls.backend(name).status()
+            backend = cls.backend(name)
         except BackendError as exc:
             return status_dict(False, None, str(exc))
+        last = cls._last_status.get(name)
+        if last is not None and last[0] is backend and USE.in_flight(name):
+            return last[1]
+        try:
+            status = backend.status()
+        except BackendError as exc:
+            return status_dict(False, None, str(exc))
+        cls._last_status[name] = (backend, status)
+        return status
 
     # -- plumbing ----------------------------------------------------------
     def log_message(self, fmt, *args):  # quiet by default; launchd captures stderr
