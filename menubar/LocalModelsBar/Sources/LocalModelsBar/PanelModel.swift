@@ -456,7 +456,14 @@ final class PanelModel: ObservableObject {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/afplay")
             process.arguments = [wavURL.path]
-            try process.run()
+            // One file per press; drop it once it has been played.
+            process.terminationHandler = { _ in try? FileManager.default.removeItem(at: wavURL) }
+            do {
+                try process.run()
+            } catch {
+                try? FileManager.default.removeItem(at: wavURL)
+                throw error
+            }
         } catch {
             // Best-effort greeting; the row's status dot already tells the
             // real story, so a failed speak has nothing further to report.
