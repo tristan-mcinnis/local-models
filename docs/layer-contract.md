@@ -33,8 +33,9 @@ Vision is at 3 (the mlx-vlm server predates this repo and was adopted).
 Completion reached 3 on 2026-08-29: the daemon manages a llama-server
 (spawn on warm, stop on unload, thinking disabled), and the first client
 app routes to it behind a user toggle with its in-process engine as the
-off-switch fallback. Transcription stays at 1 until the dictation app
-stabilizes.
+off-switch fallback. Transcription stays at 1. Local Dictation will not
+adopt it: it keeps its models in process for latency, a named exception to
+the one serving layer (house-system `docs/vision.md`).
 
 ## Server ownership
 

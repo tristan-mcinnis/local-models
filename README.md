@@ -31,9 +31,10 @@ and the memory. Adding a sixth app costs a client call, not a model integration.
 
 \* transcription is phase 2; its endpoint exists and returns an honest 501
 until then. Completion serves (daemon-managed llama-server). Dictation is not a
-client yet: Local Dictation runs its own models in process, for latency, and
-shares only the `~/Models/` weight store; the daemon does no dictation inference
-until transcription ships.
+client, by decision: Local Dictation keeps its models in process for latency and
+shares only the `~/Models/` weight store. It is a named exception to the one
+serving layer (house-system `docs/vision.md`), and transcription serving, when
+it ships, is for other callers.
 
 ## Install
 

@@ -23,5 +23,5 @@ class MlxAudioSttBackend(Backend):
     def infer(self, model: dict, payload: dict) -> dict:
         raise NotSupported(
             "transcription serving is not implemented yet; "
-            "dictation apps keep their in-process pipeline for now"
+            "Local Dictation runs its own in-process pipeline by design"
         )
