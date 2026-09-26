@@ -69,6 +69,7 @@ from common import (  # noqa: E402
     idle_unload_seconds,
     load_registry,
     model_path,
+    registry_path,
     resolve_model,
 )
 
@@ -386,9 +387,44 @@ class IdleSweeper(threading.Thread):
 
 class Handler(BaseHTTPRequestHandler):
     registry: dict = {}
+    #: The file `registry` was read from, when the daemon was started from one.
+    #: The registry is edited while the daemon runs (`local-model pull`, `add`,
+    #: `rm`, or a hand edit after the menu bar's Open registry), so every
+    #: request re-reads it when the file has changed. None (tests that assign
+    #: `registry` directly) means never re-read.
+    registry_file: Path | None = None
+    _registry_stamp: tuple[int, int] | None = None
+    #: The idle-unload threshold the sweeper is running with; None until
+    #: `make_server` starts one.
+    idle_threshold: float | None = None
     # One backend instance per name for the daemon's lifetime, so backends that
     # own child processes (llama-server) keep them across requests.
     backend_cache: dict = {}
+
+    @classmethod
+    def refresh_registry(cls) -> None:
+        """Re-read the registry file if it changed since the last read.
+
+        A stat per request is the whole cost when nothing changed. A file that
+        cannot be read or parsed (half-written, a typo) keeps the last good
+        registry in force and is logged once, not on every request. Backends
+        already built keep the endpoints they were built with; only the model
+        list, aliases and default follow the file.
+        """
+        if cls.registry_file is None:
+            return
+        try:
+            info = cls.registry_file.stat()
+        except OSError:
+            return
+        stamp = (info.st_mtime_ns, info.st_size)
+        if stamp == cls._registry_stamp:
+            return
+        cls._registry_stamp = stamp
+        try:
+            cls.registry = load_registry(cls.registry_file)
+        except RegistryError as exc:
+            print(f"registry not reloaded, keeping the last good one: {exc}", file=sys.stderr, flush=True)
 
     @classmethod
     def backend(cls, name: str):
@@ -455,6 +491,7 @@ class Handler(BaseHTTPRequestHandler):
         if handler is None:
             self._error(404, f"no route {self.path}")
             return
+        self.refresh_registry()
         try:
             handler()
         except (ValueError, RegistryError) as exc:
@@ -539,7 +576,9 @@ class Handler(BaseHTTPRequestHandler):
             200,
             {
                 "default": self.registry.get("default"),
-                "idle_unload_seconds": idle_unload_seconds(self.registry),
+                "idle_unload_seconds": (
+                    idle_unload_seconds(self.registry) if self.idle_threshold is None else self.idle_threshold
+                ),
                 "models": self.model_states(),
             },
         )
@@ -738,10 +777,15 @@ def make_server(args) -> ThreadingHTTPServer:
     same kind of extra: it is written once the port is known, and a write that
     fails is logged and ignored.
     """
+    registry_file = args.registry or registry_path()
     try:
-        Handler.registry = load_registry(args.registry)
+        Handler.registry = load_registry(registry_file)
     except RegistryError as exc:
         raise SystemExit(str(exc))
+    Handler.registry_file = registry_file
+    with contextlib.suppress(OSError):
+        info = registry_file.stat()
+        Handler._registry_stamp = (info.st_mtime_ns, info.st_size)
     if args.ensure_vision:
         try:
             get_backend("mlx-vlm", Handler.registry).ensure()
@@ -755,6 +799,9 @@ def make_server(args) -> ThreadingHTTPServer:
     # The sweeper is attached to the server so the caller owns its lifetime;
     # it is a daemon thread, so a dead server never keeps the process alive.
     server.idle_sweeper = IdleSweeper(Handler, idle_unload_seconds(Handler.registry))
+    # The registry can be re-read while the daemon runs, but the sweeper keeps
+    # the threshold it started with, so that is the one to report.
+    Handler.idle_threshold = server.idle_sweeper.threshold
     if server.idle_sweeper.enabled:
         server.idle_sweeper.start()
         print(

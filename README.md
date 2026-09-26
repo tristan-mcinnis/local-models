@@ -62,7 +62,10 @@ local-model rm old-model --purge
 
 `pull` downloads into `~/Models/`, infers the backend from the artifact
 (MLX snapshot vs GGUF file), sizes it, and writes the registry entry. Weights
-never enter git; the registry is the only integration surface.
+never enter git; the registry is the only integration surface. A running
+daemon re-reads the registry when the file changes, so a pulled or added model
+is callable at once, with no restart (backend endpoints such as `server.base_url`
+are still read once, at start).
 
 ## Use models
 

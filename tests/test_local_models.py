@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import http.client
 import importlib.util
+import io
 import json
 import os
 import socket
@@ -13,6 +15,7 @@ import tempfile
 import threading
 import time
 import unittest
+import unittest.mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -246,6 +249,67 @@ class DaemonRoutingTests(unittest.TestCase):
             status, data = self.http("POST", "/v1/ask", body)
             self.assertEqual(status, 400, (body, data))
             self.assertIn("object", data["error"])
+
+
+class RegistryReloadTests(unittest.TestCase):
+    """`local-model pull/add/rm` edit the registry while the daemon runs; the
+    daemon must see the edit without a restart."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = make_home(Path(tmp.name))
+        self.registry_file = self.home / "models.json"
+        env = unittest.mock.patch.dict(os.environ, {"HOUSE_COMMANDS_DIR": str(self.home / "commands")})
+        env.start()
+        self.addCleanup(env.stop)
+        import argparse
+
+        # Backends another class built point at servers that are gone; build
+        # fresh ones against this registry.
+        serve.Handler.backend_cache = {}
+        args = argparse.Namespace(port=0, registry=self.registry_file, ensure_vision=False)
+        self.server = serve.make_server(args)
+        self.addCleanup(self._teardown)
+        self.port = self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def _teardown(self):
+        self.server.idle_sweeper.stop()
+        self.server.shutdown()
+        self.server.server_close()
+        serve.Handler.registry_file = None
+        serve.Handler._registry_stamp = None
+        serve.Handler.idle_threshold = None
+        serve.Handler.backend_cache = {}
+
+    def ids(self) -> list[str]:
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        conn.request("GET", "/v1/models")
+        data = json.loads(conn.getresponse().read())
+        conn.close()
+        return [m["id"] for m in data["models"]]
+
+    def edit(self, change) -> None:
+        registry = json.loads(self.registry_file.read_text())
+        change(registry)
+        self.registry_file.write_text(json.dumps(registry, indent=2))
+
+    def test_a_model_added_after_start_is_served(self):
+        self.assertEqual(self.ids(), ["fake"])
+        (self.home / "second").mkdir()
+        result = run_cli(self.home, "add", str(self.home / "second"), "--name", "second",
+                         "--backend", "mlx-vlm", "--capabilities", "vision")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.ids(), ["fake", "second"])
+
+    def test_an_unreadable_edit_keeps_the_last_good_registry(self):
+        self.edit(lambda r: r["models"].update(second={**r["models"]["fake"]}))
+        self.assertEqual(self.ids(), ["fake", "second"])
+        self.registry_file.write_text("{ not json")
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(self.ids(), ["fake", "second"])
+        self.assertIn("keeping the last good one", err.getvalue())
 
 
 class CliThroughDaemonTests(unittest.TestCase):
