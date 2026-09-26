@@ -49,7 +49,11 @@ make install-server   # launchd agent for the daemon (port 8078); the CLIs need 
 Requirements: macOS on Apple Silicon, Python 3.11+, [mlx-vlm](https://github.com/Blaizzy/mlx-vlm)
 for the vision backend, `huggingface_hub` for `pull`, `jsonschema` for
 `local-image extract`. Apple Vision OCR is used when pyobjc is present,
-falling back to Tesseract.
+falling back to Tesseract. The CLIs run under the first `python3` on PATH
+(`#!/usr/bin/env python3`), not the daemon's interpreter, so that `python3`
+needs these packages too: a conda or Homebrew `python3` ahead of the one with
+mlx-vlm makes `pull` fail with "huggingface_hub is required" and OCR fall back
+to Tesseract.
 
 ## Get a model
 

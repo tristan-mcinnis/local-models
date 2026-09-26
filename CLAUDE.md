@@ -28,13 +28,17 @@ the daemon owns the weights, the loading, and the memory. Thin clients only.
 
 ```bash
 make test                          # unit tests + daemon smoke + publish scrub
-sh tests/compat.sh                 # live gate: deployed CLIs against ~/Models
+sh tests/compat.sh                 # live gate: deployed CLIs against ~/Models (read-only)
 python3 tests/roundtrip_pull.py    # network: real HF pull into a temp home
 cd client/swift/LocalModelClient && swift build && swift test
 cd menubar/LocalModelsBar && swift build
 python3 server/serve.py --ensure-vision   # run the daemon by hand
 make install-server / make restart / make logs
 ```
+
+compat.sh and roundtrip_pull.py need a `python3` with huggingface_hub and
+pyobjc first on PATH (the interpreter in the daemon plist has both); under a
+bare conda `python3` the pull fails and OCR falls back to Tesseract.
 
 Run `make test` after any Python change. Run both Swift builds (and the
 client's `swift test`) after any Swift change. After a server or CLI change run `make install && make restart`
