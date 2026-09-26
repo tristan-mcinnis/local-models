@@ -29,6 +29,8 @@ DEFAULT_BASE_URL = "http://127.0.0.1:8080"
 #: only the spawn-side guard so a child is never started on a remote or wildcard
 #: interface.
 _LOOPBACK_HOSTS = ("127.0.0.1", "localhost")
+#: health() for a server that took the connection but did not answer in time.
+BUSY = {"status": "busy", "loaded_model": None}
 #: Seconds between health polls while waiting for a server.
 _POLL_INTERVAL = 0.5
 #: Seconds to wait for a spawned child to exit during cleanup before force-kill.
@@ -47,8 +49,19 @@ class MlxVlmBackend(Backend):
 
     # -- lifecycle ---------------------------------------------------------
     def health(self) -> dict | None:
+        """The server's /health body; `BUSY` when it is up but busy; None when
+        nothing answers.
+
+        The server generates on its event loop, so while a vision call runs it
+        accepts connections and answers nothing until the call ends. A read
+        timeout therefore means busy, not down: a connection refused is down.
+        Reading busy as down made every second concurrent vision call a 502,
+        and would have had ensure() spawn a competing child on the same port.
+        """
         try:
             return http_json(self.base_url, "/health", timeout=5)
+        except TimeoutError:
+            return dict(BUSY)
         except (OSError, urllib.error.URLError, json.JSONDecodeError):
             return None
 

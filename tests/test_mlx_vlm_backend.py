@@ -20,6 +20,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -275,6 +276,33 @@ class EnsureTests(EnsureTestBase):
         with self.assertRaises(BackendError):
             backend.prepare({"path": "x"})
         self.popen.assert_not_called()
+
+
+class BusyServerTests(unittest.TestCase):
+    """The server blocks its event loop while generating, so a health probe
+    during a vision call times out on read. That is busy, not down."""
+
+    def test_a_read_timeout_is_busy_and_up(self):
+        backend = make_backend()
+        with mock.patch.object(mlx_vlm, "http_json", side_effect=TimeoutError("timed out")):
+            self.assertEqual(backend.health()["status"], "busy")
+            backend.prepare({"path": "x"})  # queues behind the running call
+            self.assertTrue(backend.status()["available"])
+
+    def test_a_busy_server_is_adopted_not_competed_with(self):
+        backend = make_backend()
+        with mock.patch.object(mlx_vlm, "http_json", side_effect=TimeoutError("timed out")), \
+                mock.patch.object(mlx_vlm.subprocess, "Popen", autospec=True) as popen:
+            backend.ensure()
+        popen.assert_not_called()
+
+    def test_a_refused_connection_is_still_down(self):
+        backend = make_backend()
+        refused = urllib.error.URLError(ConnectionRefusedError(61, "Connection refused"))
+        with mock.patch.object(mlx_vlm, "http_json", side_effect=refused):
+            self.assertIsNone(backend.health())
+            with self.assertRaises(BackendError):
+                backend.prepare({"path": "x"})
 
 
 class SpawnArgvTests(unittest.TestCase):
