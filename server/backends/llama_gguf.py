@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import threading
 import time
 import urllib.error
 from pathlib import Path
@@ -33,6 +34,12 @@ class LlamaGgufBackend(Backend):
         self.base_url = registry.get("completion_server", {}).get("base_url", DEFAULT_BASE_URL)
         self._child: subprocess.Popen | None = None
         self._child_model: str | None = None
+        # The daemon serves each request on its own thread. Without this, two
+        # cold requests each saw no server and each spawned one (the second
+        # stop() killing the first child mid-load), and an unload landing
+        # mid-load cleared the child under the thread waiting on it. Reentrant
+        # because ensure() stops the old child on its way to a new one.
+        self._lifecycle = threading.RLock()
 
     # -- lifecycle ---------------------------------------------------------
     def binary(self) -> str | None:
@@ -64,6 +71,10 @@ class LlamaGgufBackend(Backend):
 
     def ensure(self, model: dict, wait_seconds: int = 180) -> None:
         """Make llama-server serve this model, respawning if a different one is up."""
+        with self._lifecycle:
+            self._ensure_locked(model, wait_seconds)
+
+    def _ensure_locked(self, model: dict, wait_seconds: int) -> None:
         target = model_path(model)
         if self.health() and self.served_model_path() == target:
             return
@@ -98,14 +109,15 @@ class LlamaGgufBackend(Backend):
         raise BackendError(f"llama-server did not become healthy at {self.base_url}")
 
     def stop(self) -> None:
-        if self._child is not None and self._child.poll() is None:
-            self._child.terminate()
-            try:
-                self._child.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                self._child.kill()
-        self._child = None
-        self._child_model = None
+        with self._lifecycle:
+            if self._child is not None and self._child.poll() is None:
+                self._child.terminate()
+                try:
+                    self._child.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    self._child.kill()
+            self._child = None
+            self._child_model = None
 
     # -- contract ----------------------------------------------------------
     def status(self) -> dict[str, Any]:
@@ -156,11 +168,12 @@ class LlamaGgufBackend(Backend):
         return {"text": text, "raw": result}
 
     def unload(self) -> dict:
-        if self._child is not None:
-            self.stop()
-            return {"message": "llama-server stopped; completion model unloaded"}
-        if self.health():
-            raise BackendError(
-                "a llama-server is running but the daemon did not start it; stop it where it was started"
-            )
-        return {"message": "no completion model was loaded"}
+        with self._lifecycle:
+            if self._child is not None:
+                self.stop()
+                return {"message": "llama-server stopped; completion model unloaded"}
+            if self.health():
+                raise BackendError(
+                    "a llama-server is running but the daemon did not start it; stop it where it was started"
+                )
+            return {"message": "no completion model was loaded"}
