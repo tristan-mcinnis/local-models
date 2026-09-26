@@ -75,24 +75,34 @@ enum DaemonAgent {
 
     /// Bootstrap the job if it was booted out, then kick it. The bootstrap is
     /// a no-op (and prints to its own pipe) when the job is already loaded.
-    static func start() {
-        run(["bootstrap", "gui/\(getuid())", plistPath])
-        run(["kickstart", "-k", target])
+    static func start() async {
+        await run(["bootstrap", "gui/\(getuid())", plistPath])
+        await run(["kickstart", "-k", target])
     }
 
     /// Boot the job out. `KeepAlive` means nothing softer than this stops it.
-    static func stop() {
-        run(["bootout", target])
+    static func stop() async {
+        await run(["bootout", target])
     }
 
-    private static func run(_ arguments: [String]) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        process.arguments = arguments
-        process.standardOutput = Pipe()
-        process.standardError = Pipe()
-        try? process.run()
-        process.waitUntilExit()
+    /// Runs `launchctl` and resumes when it exits. It never blocks a thread
+    /// waiting: the header switch calls this from the main actor, and a
+    /// `bootout` waits for the daemon to exit, so `waitUntilExit()` there
+    /// froze the panel for as long as the daemon took to stop.
+    private static func run(_ arguments: [String]) async {
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            process.arguments = arguments
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            process.terminationHandler = { _ in done.resume() }
+            do {
+                try process.run()
+            } catch {
+                done.resume()
+            }
+        }
     }
 }
 
@@ -468,8 +478,8 @@ final class PanelModel: ObservableObject {
     /// The header switch. Start bootstraps and kicks the launchd job; stop
     /// boots it out, which is the only thing a `KeepAlive` job answers to.
     func setDaemonRunning(_ wanted: Bool) {
-        if wanted { DaemonAgent.start() } else { DaemonAgent.stop() }
         Task {
+            if wanted { await DaemonAgent.start() } else { await DaemonAgent.stop() }
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             await refresh()
         }
