@@ -88,6 +88,30 @@ final class PollBackoffTests: XCTestCase {
         XCTAssertGreaterThan(scheduled.tolerance, 0)
     }
 
+    /// The regression: the repeating timer kept the interval it was armed
+    /// with, so a panel nobody opened never backed off. A tick past the idle
+    /// threshold must re-arm at the backed-off interval.
+    func testATickPastTheIdleThresholdReArmsAtTheBackedOffInterval() throws {
+        let launch = Date()
+        var clock = launch
+        let model = makeModel(now: { clock })
+        model.schedulePoll()
+        XCTAssertEqual(try XCTUnwrap(model.scheduledPoll).interval, model.baseInterval, accuracy: 0.001)
+
+        clock = launch.addingTimeInterval(48 * 60 * 60)
+        model.pollTick()
+        XCTAssertEqual(refreshCount, 1)
+        XCTAssertEqual(try XCTUnwrap(model.scheduledPoll).interval, PanelModel.idlePollCeiling, accuracy: 0.001)
+    }
+
+    func testATickWithinTheThresholdKeepsTheArmedTimer() throws {
+        let model = makeModel()
+        model.schedulePoll()
+        let before = try XCTUnwrap(model.scheduledPoll).interval
+        model.pollTick()
+        XCTAssertEqual(try XCTUnwrap(model.scheduledPoll).interval, before, accuracy: 0.001)
+    }
+
     func testOpeningAStalePanelKicksABackgroundRefresh() {
         let model = makeModel()
         model.lastPolledAt = Date(timeIntervalSinceNow: -3600)

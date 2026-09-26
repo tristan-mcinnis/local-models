@@ -149,8 +149,8 @@ final class PanelModel: ObservableObject {
     var lastPolledAt: Date?
     /// The clock, injected so the idle backoff is tested without waiting.
     var now: () -> Date = { Date() }
-    /// The read a stale open kicks off behind the panel. It is the ordinary
-    /// poll; a test replaces it so that opening a panel calls no daemon.
+    /// The read a stale open or a timer tick kicks off. It is the ordinary
+    /// poll; a test replaces it so that nothing in a test calls the daemon.
     lazy var backgroundRefresh: () -> Void = { [weak self] in self?.poll() }
 
     /// Raised while the panel is on screen, so polling speeds up.
@@ -342,12 +342,24 @@ final class PanelModel: ObservableObject {
         pollTimer?.invalidate()
         let interval = pollInterval
         let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.poll() }
+            Task { @MainActor [weak self] in self?.pollTick() }
         }
         // Let macOS batch this wakeup with whatever else wakes near it rather
         // than waking the CPU for the poll alone.
         timer.tolerance = interval * Self.pollToleranceFraction
         pollTimer = timer
+    }
+
+    /// One timer tick: read, then re-arm when the interval has moved on.
+    /// The timer repeats at the interval it was armed with, and before this
+    /// only an open, a close or a settings change re-armed it, so a closed
+    /// panel kept polling at the configured rate however long nobody looked
+    /// and the idle backoff never took effect.
+    func pollTick() {
+        backgroundRefresh()
+        if let armed = pollTimer?.timeInterval, abs(armed - pollInterval) > 0.5 {
+            schedulePoll()
+        }
     }
 
     /// Called when the panel opens. Opening draws the rows already in hand at
