@@ -239,6 +239,14 @@ class DaemonRoutingTests(unittest.TestCase):
         self.assertEqual(status, 502)
         self.assertIn("unavailable", data["error"])
 
+    def test_non_object_body_is_400_not_a_dropped_connection(self):
+        # A JSON list or scalar used to raise past the error envelope, so the
+        # client saw the connection close with no reply at all.
+        for body in ([1], "hi", 3):
+            status, data = self.http("POST", "/v1/ask", body)
+            self.assertEqual(status, 400, (body, data))
+            self.assertIn("object", data["error"])
+
 
 class CliThroughDaemonTests(unittest.TestCase):
     """The CLIs reach models only through the daemon; the daemon's error

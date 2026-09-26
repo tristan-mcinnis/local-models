@@ -441,9 +441,14 @@ class Handler(BaseHTTPRequestHandler):
         if not length:
             return {}
         try:
-            return json.loads(self.rfile.read(length))
+            payload = json.loads(self.rfile.read(length))
         except json.JSONDecodeError as exc:
             raise ValueError(f"invalid JSON body: {exc}")
+        # Every route reads fields off the body; a list or a bare string would
+        # otherwise raise past the error envelope and drop the connection.
+        if not isinstance(payload, dict):
+            raise ValueError("JSON body must be an object")
+        return payload
 
     def _dispatch(self, routes: dict) -> None:
         handler = routes.get(self.path)
