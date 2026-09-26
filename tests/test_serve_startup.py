@@ -152,6 +152,8 @@ class StartupDegradationTests(unittest.TestCase):
         self.addCleanup(server.shutdown)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
+        if server.startup_ensure is not None:
+            server.startup_ensure.join(timeout=10)
         return server, stderr
 
     def test_failed_startup_ensure_serves_degraded_health(self):
@@ -173,6 +175,34 @@ class StartupDegradationTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertTrue(data["backends"]["mlx-vlm"]["available"])
             self.assertNotIn("serving degraded", captured_stream.getvalue())
+
+    def test_port_opens_before_a_slow_vision_ensure_finishes(self):
+        """A launchd-managed vision server still importing mlx at login held
+        the daemon's port closed for up to 30 s."""
+        release = threading.Event()
+
+        class SlowVisionBackend(HealthyVisionBackend):
+            def ensure(self, wait_seconds: int = 30) -> None:
+                release.wait(timeout=10)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            reg_path = write_registry(Path(tmp))
+            with mock.patch.object(
+                serve, "get_backend", side_effect=lambda name, reg: SlowVisionBackend() if name == "mlx-vlm" else StubBackend()
+            ):
+                serve.Handler.backend_cache = {}
+                server = serve.make_server(args_for(reg_path))
+                try:
+                    threading.Thread(target=server.serve_forever, daemon=True).start()
+                    self.assertTrue(server.startup_ensure.is_alive())
+                    status, data = get_health(server.server_address[1])
+                    self.assertEqual(status, 200)
+                    self.assertEqual(data["status"], "ok")
+                finally:
+                    release.set()
+                    server.startup_ensure.join(timeout=10)
+                    server.shutdown()
+                    server.server_close()
 
     def test_ensure_vision_absent_never_calls_get_backend(self):
         with tempfile.TemporaryDirectory() as tmp:

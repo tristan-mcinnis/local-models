@@ -791,10 +791,11 @@ class Handler(BaseHTTPRequestHandler):
 def make_server(args) -> ThreadingHTTPServer:
     """Load the registry, run startup readying, and bind the HTTP server.
 
-    A failed vision ensure (e.g. a launchd-managed server that never came up)
-    is a warning, not a fatal startup error: the daemon still binds and serves
-    degraded — vision calls return 502 until the backend is available — instead
-    of killing the whole process. Publishing the house command manifest is the
+    The vision ensure runs after the bind, on a thread (`server.startup_ensure`),
+    so the port opens at once. A failed ensure (e.g. a launchd-managed server
+    that never came up) is a warning, not a fatal startup error: the daemon
+    serves degraded — vision calls return 502 until the backend is available —
+    instead of killing the whole process. Publishing the house command manifest is the
     same kind of extra: it is written once the port is known, and a write that
     fails is logged and ignored.
     """
@@ -807,15 +808,6 @@ def make_server(args) -> ThreadingHTTPServer:
     with contextlib.suppress(OSError):
         info = registry_file.stat()
         Handler._registry_stamp = (info.st_mtime_ns, info.st_size)
-    if args.ensure_vision:
-        try:
-            get_backend("mlx-vlm", Handler.registry).ensure()
-        except BackendError as exc:
-            print(
-                f"warning: vision backend not ensured; serving degraded: {exc}",
-                file=sys.stderr,
-                flush=True,
-            )
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     # The sweeper is attached to the server so the caller owns its lifetime;
     # it is a daemon thread, so a dead server never keeps the process alive.
@@ -834,7 +826,31 @@ def make_server(args) -> ThreadingHTTPServer:
         print("idle unload disabled (threshold 0)", file=sys.stderr, flush=True)
     # After the bind, so the manifest publishes the port actually being served.
     commands.write_manifest(f"http://127.0.0.1:{server.server_address[1]}")
+    # Readying vision runs after the bind, on its own thread. It can wait up to
+    # 30 s for a launchd-managed server that is still importing mlx at login,
+    # and before, the port stayed closed that whole time: every client, even
+    # one that only wanted completion or the model list, read the daemon as
+    # down. Vision calls that land before it finishes get the usual 502.
+    server.startup_ensure = None
+    if args.ensure_vision:
+        server.startup_ensure = threading.Thread(
+            target=ensure_vision_at_startup, args=(Handler.registry,), name="ensure-vision", daemon=True
+        )
+        server.startup_ensure.start()
     return server
+
+
+def ensure_vision_at_startup(registry: dict) -> None:
+    """Adopt, wait for, or spawn the mlx-vlm server. A failure is a warning:
+    the daemon keeps serving, degraded."""
+    try:
+        get_backend("mlx-vlm", registry).ensure()
+    except BackendError as exc:
+        print(
+            f"warning: vision backend not ensured; serving degraded: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def main() -> None:
