@@ -80,8 +80,12 @@ def idle_unload_seconds(registry: dict | None = None) -> float:
     `GET /v1/models` reports the threshold actually in force.
     """
     raw = os.environ.get("LOCAL_MODELS_IDLE_UNLOAD_SECONDS")
-    if raw is None and registry:
-        raw = registry.get("daemon", {}).get("idle_unload_seconds")
+    if raw is None and isinstance(registry, dict):
+        # A hand edit can leave "daemon" as null or a string; that is an
+        # unreadable value too, not a crash in the sweeper or /v1/models.
+        section = registry.get("daemon")
+        if isinstance(section, dict):
+            raw = section.get("idle_unload_seconds")
     if raw is None or raw == "":
         return DEFAULT_IDLE_UNLOAD_SECONDS
     try:

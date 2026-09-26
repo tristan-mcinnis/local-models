@@ -366,7 +366,13 @@ class IdleSweeper(threading.Thread):
 
     def run(self) -> None:
         while not self._stop.wait(self.interval):
-            self.sweep()
+            # The tick reads a hand-edited registry file. One bad tick is
+            # logged and the next one runs; the thread must not die, or idle
+            # unload stays off until a restart even after the file is fixed.
+            try:
+                self.sweep()
+            except Exception as exc:  # noqa: BLE001
+                print(f"idle sweep failed, retrying next tick: {exc!r}", file=sys.stderr, flush=True)
 
     def retune(self) -> None:
         """Take the current threshold from `threshold_source`, logging a change."""

@@ -459,6 +459,31 @@ class ThresholdConfigTests(unittest.TestCase):
         with self.env("-1"):
             self.assertEqual(serve.idle_unload_seconds({}), 0.0)
 
+    def test_a_daemon_section_that_is_not_an_object_reads_as_the_default(self):
+        """A hand edit to "daemon": null used to raise AttributeError, which
+        now that the sweeper re-reads the registry every tick would kill it."""
+        with self.env(None):
+            for section in (None, "x", 5, []):
+                self.assertEqual(serve.idle_unload_seconds({"daemon": section}), 1800.0)
+
+    def test_a_failing_tick_does_not_kill_the_sweeper(self):
+        calls = []
+
+        def source():
+            calls.append(1)
+            if len(calls) < 3:
+                raise RuntimeError("registry mid-edit")
+            return 5.0
+
+        sweep = serve.IdleSweeper(FakeHandler({}), 900, interval=0.01, threshold_source=source)
+        sweep.start()
+        self.addCleanup(sweep.stop)
+        deadline = time.monotonic() + 5
+        while sweep.threshold != 5.0 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(sweep.is_alive(), "one failed tick killed the sweeper thread")
+        self.assertEqual(sweep.threshold, 5.0)
+
     @staticmethod
     def env(value: str | None):
         """The env override set to `value`, or removed when it is None, for the
