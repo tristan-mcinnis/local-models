@@ -156,7 +156,10 @@ process is never touched.
 
 Default 30 minutes; `0` (or `LOCAL_MODELS_IDLE_UNLOAD_SECONDS=0`) switches it
 off and a model stays warm until it is unloaded by hand, as before. The
-override is `LOCAL_MODELS_IDLE_UNLOAD_SECONDS`, in seconds.
+override is `LOCAL_MODELS_IDLE_UNLOAD_SECONDS`, in seconds. An edit to the
+registry value needs no restart: the sweeper re-reads it at the start of every
+tick, so a new value (or 0, or back on) takes effect within a minute. The env
+override is fixed for the life of the daemon process.
 
 The unload can never land under a live request: the sweeper takes the same
 claim a request holds, and only when nothing is in flight. The next request

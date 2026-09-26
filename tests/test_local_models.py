@@ -280,7 +280,6 @@ class RegistryReloadTests(unittest.TestCase):
         self.server.server_close()
         serve.Handler.registry_file = None
         serve.Handler._registry_stamp = None
-        serve.Handler.idle_threshold = None
         serve.Handler.backend_cache = {}
 
     def ids(self) -> list[str]:
@@ -302,6 +301,18 @@ class RegistryReloadTests(unittest.TestCase):
                          "--backend", "mlx-vlm", "--capabilities", "vision")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.ids(), ["fake", "second"])
+
+    def test_an_idle_threshold_edit_is_reported_without_a_restart(self):
+        with unittest.mock.patch.dict(os.environ):
+            os.environ.pop("LOCAL_MODELS_IDLE_UNLOAD_SECONDS", None)
+            self.edit(lambda r: r.setdefault("daemon", {}).update(idle_unload_seconds=60))
+            conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+            conn.request("GET", "/v1/models")
+            reported = json.loads(conn.getresponse().read())["idle_unload_seconds"]
+            conn.close()
+            self.assertEqual(reported, 60.0)
+            self.server.idle_sweeper.retune()
+            self.assertEqual(self.server.idle_sweeper.threshold, 60.0)
 
     def test_an_unreadable_edit_keeps_the_last_good_registry(self):
         self.edit(lambda r: r["models"].update(second={**r["models"]["fake"]}))

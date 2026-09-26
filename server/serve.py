@@ -20,8 +20,10 @@ forgotten holds its resident memory for days. Every request that puts a backend
 to work stamps that backend's clock (reading state through /health or
 /v1/models does not), and a sweeper thread unloads any backend that goes
 `daemon.idle_unload_seconds` unused — 30 minutes by default, 0 to switch it
-off, $LOCAL_MODELS_IDLE_UNLOAD_SECONDS to override. The next request readies
-the backend again, so an idle unload costs a reload, never an error.
+off, $LOCAL_MODELS_IDLE_UNLOAD_SECONDS to override. The sweeper re-reads the
+registry value every tick, so a new threshold needs no restart. The next
+request readies the backend again, so an idle unload costs a reload, never an
+error.
 
 OpenAI-compatible passthrough (for clients that speak OpenAI chat, e.g.
 Quick Launch's local provider), so no app needs a backend port:
@@ -333,14 +335,26 @@ class IdleSweeper(threading.Thread):
     is the same one `BackendUse.using()` waits on, and it is granted only when
     nothing is in flight. A backend it cannot claim is simply left for the next
     tick.
+
+    `threshold_source`, when given, is asked for the threshold at the start of
+    every tick, so an edit to `daemon.idle_unload_seconds` (including to or
+    from 0, the off switch) takes effect on the next tick without a restart.
     """
 
-    def __init__(self, handler, threshold: float, interval: float = SWEEP_INTERVAL_SECONDS, use: BackendUse | None = None):
+    def __init__(
+        self,
+        handler,
+        threshold: float,
+        interval: float = SWEEP_INTERVAL_SECONDS,
+        use: BackendUse | None = None,
+        threshold_source=None,
+    ):
         super().__init__(name="idle-sweeper", daemon=True)
         self.handler = handler
         self.threshold = threshold
         self.interval = interval
         self.use = use or USE
+        self.threshold_source = threshold_source
         self._stop = threading.Event()
 
     @property
@@ -354,8 +368,23 @@ class IdleSweeper(threading.Thread):
         while not self._stop.wait(self.interval):
             self.sweep()
 
+    def retune(self) -> None:
+        """Take the current threshold from `threshold_source`, logging a change."""
+        if self.threshold_source is None:
+            return
+        threshold = self.threshold_source()
+        if threshold != self.threshold:
+            print(
+                f"idle unload now {'off' if threshold <= 0 else f'after {threshold:.0f}s unused'}"
+                f" (was {'off' if self.threshold <= 0 else f'{self.threshold:.0f}s'})",
+                file=sys.stderr,
+                flush=True,
+            )
+            self.threshold = threshold
+
     def sweep(self) -> list[str]:
         """One pass. Returns the names of the backends it unloaded."""
+        self.retune()
         if not self.enabled:
             return []
         unloaded = []
@@ -394,9 +423,6 @@ class Handler(BaseHTTPRequestHandler):
     #: `registry` directly) means never re-read.
     registry_file: Path | None = None
     _registry_stamp: tuple[int, int] | None = None
-    #: The idle-unload threshold the sweeper is running with; None until
-    #: `make_server` starts one.
-    idle_threshold: float | None = None
     # One backend instance per name for the daemon's lifetime, so backends that
     # own child processes (llama-server) keep them across requests.
     backend_cache: dict = {}
@@ -597,9 +623,9 @@ class Handler(BaseHTTPRequestHandler):
             200,
             {
                 "default": self.registry.get("default"),
-                "idle_unload_seconds": (
-                    idle_unload_seconds(self.registry) if self.idle_threshold is None else self.idle_threshold
-                ),
+                # The sweeper reads the same value at the start of its next
+                # tick, so this is the threshold in force within a minute.
+                "idle_unload_seconds": idle_unload_seconds(self.registry),
                 "models": self.model_states(),
             },
         )
@@ -811,19 +837,21 @@ def make_server(args) -> ThreadingHTTPServer:
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     # The sweeper is attached to the server so the caller owns its lifetime;
     # it is a daemon thread, so a dead server never keeps the process alive.
-    server.idle_sweeper = IdleSweeper(Handler, idle_unload_seconds(Handler.registry))
-    # The registry can be re-read while the daemon runs, but the sweeper keeps
-    # the threshold it started with, so that is the one to report.
-    Handler.idle_threshold = server.idle_sweeper.threshold
+    # It runs even at threshold 0: every tick re-reads the registry, so turning
+    # idle unload on, off, or to a new value needs no restart. A tick at 0 is
+    # one stat of the registry file and nothing else.
+    server.idle_sweeper = IdleSweeper(
+        Handler, idle_unload_seconds(Handler.registry), threshold_source=live_idle_threshold
+    )
+    server.idle_sweeper.start()
     if server.idle_sweeper.enabled:
-        server.idle_sweeper.start()
         print(
             f"idle unload after {server.idle_sweeper.threshold:.0f}s unused",
             file=sys.stderr,
             flush=True,
         )
     else:
-        print("idle unload disabled (threshold 0)", file=sys.stderr, flush=True)
+        print("idle unload off (threshold 0) until the registry sets one", file=sys.stderr, flush=True)
     # After the bind, so the manifest publishes the port actually being served.
     commands.write_manifest(f"http://127.0.0.1:{server.server_address[1]}")
     # Readying vision runs after the bind, on its own thread. It can wait up to
@@ -838,6 +866,12 @@ def make_server(args) -> ThreadingHTTPServer:
         )
         server.startup_ensure.start()
     return server
+
+
+def live_idle_threshold() -> float:
+    """The idle-unload threshold the registry file says now (env still wins)."""
+    Handler.refresh_registry()
+    return idle_unload_seconds(Handler.registry)
 
 
 def ensure_vision_at_startup(registry: dict) -> None:

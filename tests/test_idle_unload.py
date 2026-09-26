@@ -743,18 +743,65 @@ class SweeperStartupTests(unittest.TestCase):
         path.write_text(json.dumps(registry))
         return argparse.Namespace(port=free_port(), registry=path, ensure_vision=False)
 
-    def test_threshold_zero_never_starts_the_thread(self):
+    def _start(self, tmp: Path, threshold):
+        args = self._args(tmp, threshold)
+        server = serve.make_server(args)
+        self.addCleanup(self._reset_handler)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.idle_sweeper.stop)
+        return server, args.registry
+
+    @staticmethod
+    def _reset_handler():
+        serve.Handler.registry_file = None
+        serve.Handler._registry_stamp = None
+        serve.Handler.backend_cache = {}
+
+    def test_threshold_zero_sweeps_nothing(self):
         with tempfile.TemporaryDirectory() as tmp, ThresholdConfigTests.env(None):
-            server = serve.make_server(self._args(Path(tmp), 0))
-            self.addCleanup(server.server_close)
+            server, _ = self._start(Path(tmp), 0)
             self.assertFalse(server.idle_sweeper.enabled)
-            self.assertFalse(server.idle_sweeper.is_alive())
+            self.assertEqual(server.idle_sweeper.sweep(), [])
+
+    def test_a_registry_edit_retunes_the_running_sweeper(self):
+        """Before, the sweeper kept its start-up threshold until a restart,
+        so an edit to daemon.idle_unload_seconds did nothing."""
+        with tempfile.TemporaryDirectory() as tmp, ThresholdConfigTests.env(None):
+            server, registry_file = self._start(Path(tmp), 900)
+            sweeper = server.idle_sweeper
+
+            def set_threshold(value):
+                registry = json.loads(registry_file.read_text())
+                registry["daemon"]["idle_unload_seconds"] = value
+                registry_file.write_text(json.dumps(registry, indent=2))
+
+            set_threshold(120)
+            sweeper.retune()
+            self.assertEqual(sweeper.threshold, 120.0)
+            self.assertTrue(sweeper.enabled)
+
+            set_threshold(0)
+            sweeper.retune()
+            self.assertFalse(sweeper.enabled)
+            self.assertEqual(sweeper.sweep(), [])
+
+            set_threshold(1800)
+            sweeper.retune()
+            self.assertEqual(sweeper.threshold, 1800.0)
+            self.assertTrue(sweeper.is_alive(), "the thread must survive an off/on edit")
+
+    def test_the_env_override_still_pins_the_threshold(self):
+        with tempfile.TemporaryDirectory() as tmp, ThresholdConfigTests.env("5"):
+            server, registry_file = self._start(Path(tmp), 900)
+            registry = json.loads(registry_file.read_text())
+            registry["daemon"]["idle_unload_seconds"] = 60
+            registry_file.write_text(json.dumps(registry, indent=2))
+            server.idle_sweeper.retune()
+            self.assertEqual(server.idle_sweeper.threshold, 5.0)
 
     def test_a_threshold_starts_the_thread(self):
         with tempfile.TemporaryDirectory() as tmp, ThresholdConfigTests.env(None):
-            server = serve.make_server(self._args(Path(tmp), 900))
-            self.addCleanup(server.server_close)
-            self.addCleanup(server.idle_sweeper.stop)
+            server, _ = self._start(Path(tmp), 900)
             self.assertEqual(server.idle_sweeper.threshold, 900.0)
             self.assertTrue(server.idle_sweeper.is_alive())
 
