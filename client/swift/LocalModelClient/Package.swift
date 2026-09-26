@@ -8,6 +8,8 @@ let package = Package(
         .library(name: "LocalModelClient", targets: ["LocalModelClient"])
     ],
     targets: [
-        .target(name: "LocalModelClient")
+        .target(name: "LocalModelClient"),
+        // XCTest, like the rest of local-models (design-system/SWIFT.md floors).
+        .testTarget(name: "LocalModelClientTests", dependencies: ["LocalModelClient"])
     ]
 )

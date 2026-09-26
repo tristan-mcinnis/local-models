@@ -182,7 +182,10 @@ TTS is already served, but not by this daemon: local-tts runs its own service on
 `/v1/models` reads `backend_available: false`, and clients call 8081 directly.
 
 A minimal Swift client for native apps ships in
-[client/swift/LocalModelClient](client/swift/LocalModelClient).
+[client/swift/LocalModelClient](client/swift/LocalModelClient). Every non-200
+reply becomes `ClientError` (`notImplemented` for 501, `badResponse` otherwise)
+carrying the daemon's error body. No house app imports it yet: Quick Launch, RTI, Cotype and
+screenctx each speak the wire format directly.
 
 ## House commands
 

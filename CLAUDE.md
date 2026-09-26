@@ -30,14 +30,14 @@ the daemon owns the weights, the loading, and the memory. Thin clients only.
 make test                          # unit tests + daemon smoke + publish scrub
 sh tests/compat.sh                 # live gate: deployed CLIs against ~/Models
 python3 tests/roundtrip_pull.py    # network: real HF pull into a temp home
-cd client/swift/LocalModelClient && swift build
+cd client/swift/LocalModelClient && swift build && swift test
 cd menubar/LocalModelsBar && swift build
 python3 server/serve.py --ensure-vision   # run the daemon by hand
 make install-server / make restart / make logs
 ```
 
-Run `make test` after any Python change. Run both Swift builds after any
-Swift change. After a server or CLI change run `make install && make restart`
+Run `make test` after any Python change. Run both Swift builds (and the
+client's `swift test`) after any Swift change. After a server or CLI change run `make install && make restart`
 (restart alone reruns the old installed copy) and check `local-model status`
 before calling it done.
 

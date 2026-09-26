@@ -48,7 +48,8 @@ public struct LocalModelClient {
     }
 
     public func models() async throws -> ModelList {
-        let (data, _) = try await session.data(from: baseURL.appendingPathComponent("v1/models"))
+        let (data, response) = try await session.data(from: baseURL.appendingPathComponent("v1/models"))
+        try Self.check(data, response)
         return try JSONDecoder().decode(ModelList.self, from: data)
     }
 
@@ -70,12 +71,19 @@ public struct LocalModelClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         let (data, response) = try await session.data(for: request)
+        try Self.check(data, response)
+        return try JSONDecoder().decode(TextResult.self, from: data)
+    }
+
+    /// Every non-200 reply is the daemon's `{"error", "hint"?}` envelope, not
+    /// the success body, so it becomes a typed error instead of a decode
+    /// failure that hides the daemon's message.
+    private static func check(_ data: Data, _ response: URLResponse) throws {
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard status == 200 else {
             let text = String(data: data, encoding: .utf8) ?? ""
             if status == 501 { throw ClientError.notImplemented(text) }
             throw ClientError.badResponse(status: status, body: text)
         }
-        return try JSONDecoder().decode(TextResult.self, from: data)
     }
 }
