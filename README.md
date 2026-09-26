@@ -15,6 +15,11 @@ and burns its own RAM. Five local-AI apps become five model stacks.
 clients.** Apps make a localhost call; the daemon owns the weights, the loading,
 and the memory. Adding a sixth app costs a client call, not a model integration.
 
+Names: the repository is `local-models` (GitHub `tristan-mcinnis/local-models`);
+the CLIs are `local-model` and `local-image`; the daemon's launchd job is
+`com.local-models.server` on port 8078; the menu-bar app is "Local Models"
+(bundle `com.local-models.menubar`, source `menubar/LocalModelsBar`).
+
 ```
 ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐
 │  launcher   │ │ autocomplete│ │ screen ctx  │ │ agent/CLI   │   thin clients
