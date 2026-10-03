@@ -1,14 +1,15 @@
 #!/bin/sh
 # Publish scrub: no user-specific paths or key material in tracked files.
 #
-# Generic patterns live here. Machine-private tokens (employer domains, email
-# addresses, hostnames) belong in .scrub-private (gitignored, one ERE per
-# line) so the scanner never publishes what it scans for. This file is the
-# one tracked file excluded from the scan — review it by hand.
+# Generic patterns live here: user home paths, personal notes folders
+# (~/vault, ~/memory), and key shapes. Private tokens (client and employer
+# names, email addresses, hostnames) belong in .scrub-private (gitignored,
+# one ERE per line) so the scanner never publishes what it scans for. This
+# file is the one tracked file excluded from the scan, so review it by hand.
 set -e
 cd "$(dirname "$0")/.."
 
-GENERIC='/Users/[a-z]+/|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY|sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-|hf_[A-Za-z0-9]{30,}|ghp_[A-Za-z0-9]{30,}'
+GENERIC='/Users/[a-z]+/|~/vault|~/memory|vault-vps|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY|sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-|hf_[A-Za-z0-9]{30,}|ghp_[A-Za-z0-9]{30,}'
 PATTERN="$GENERIC"
 if [ -f .scrub-private ]; then
   PRIVATE=$(paste -sd'|' .scrub-private)
