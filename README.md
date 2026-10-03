@@ -97,7 +97,8 @@ does this by design.
   PyObjC for Apple Vision OCR (without it, OCR falls back to Tesseract).
 - [llama.cpp](https://github.com/ggml-org/llama.cpp) (`brew install llama.cpp`)
   for GGUF completion models. Optional: Tesseract (`brew install tesseract`).
-- A Swift 5.10 toolchain (Xcode 15.3 or later) to build the menu-bar app.
+- A Swift 5.10 toolchain (Xcode 15.3 or later) to build the menu-bar app from
+  source. The downloaded DMG does not need it.
 - Disk space and RAM for the models you pull. A 2B vision model at 4 bits is
   about 1.8 GB on disk.
 
@@ -107,6 +108,36 @@ or Homebrew `python3` ahead of the one with mlx-vlm makes `pull` fail with
 "huggingface_hub is required" and OCR fall back to Tesseract.
 
 ## Install
+
+### Download
+
+Get the menu-bar app from the
+[latest release](https://github.com/tristan-mcinnis/local-models/releases/latest):
+`LocalModels-<version>-macos-arm64.dmg` (Apple Silicon, macOS 14 or later).
+
+The DMG holds only the menu-bar app. The daemon is Python and installs from
+source, as shown in "Build from source and install" below. Until you install
+the daemon, the app shows it as unreachable.
+
+#### First open
+
+The app is not notarized. It is a free project and has no paid Apple Developer ID, so macOS blocks the first open. This is expected. To open it:
+
+1. Drag the app to Applications.
+2. Open it once. macOS says it cannot verify the app. Click Done.
+3. Open System Settings > Privacy & Security. Scroll down and click Open Anyway. Confirm.
+
+Or, in Terminal:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Local Models.app"
+```
+
+Each release is signed ad hoc. After an update, macOS may ask again for permissions such as Accessibility or Microphone.
+
+### Build from source and install
+
+The daemon and the CLIs always install this way.
 
 ```bash
 git clone https://github.com/tristan-mcinnis/local-models.git
@@ -344,8 +375,11 @@ make menubar           # builds dist/Local Models.app
 make install-menubar   # builds, copies to /Applications, launches
 ```
 
-The app is ad-hoc signed only (no Developer ID or notarization yet), so you
-build it from source. `LocalModelsBar --render-proof <dir>` writes the panel
+The app is ad-hoc signed only (no Developer ID or notarization), so macOS
+blocks the first open; see [First open](#first-open). `make dmg` builds the
+release image (`LocalModels-<version>-macos-arm64.dmg` with `SHA256SUMS` and
+`RELEASE_NOTES.md`) into `dist/release/` and verifies it; it uploads nothing.
+`LocalModelsBar --render-proof <dir>` writes the panel
 and settings surfaces to PNGs offscreen, in both appearances, without showing
 a window.
 
@@ -374,6 +408,7 @@ make test                          # 147 unit tests + daemon smoke + publish scr
 cd client/swift/LocalModelClient && swift build && swift test
 cd menubar/LocalModelsBar && swift build && swift test
 make menubar                       # app bundle in dist/
+make dmg                           # release DMG + SHA256SUMS in dist/release/
 python3 server/serve.py --ensure-vision   # run the daemon by hand
 ```
 

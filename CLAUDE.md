@@ -36,6 +36,7 @@ sh tests/compat.sh                 # live gate: deployed CLIs against ~/Models (
 python3 tests/roundtrip_pull.py    # network: real HF pull into a temp home
 cd client/swift/LocalModelClient && swift build && swift test
 cd menubar/LocalModelsBar && swift build
+make dmg                           # release DMG + SHA256SUMS in dist/release/ (ad hoc, uploads nothing)
 python3 server/serve.py --ensure-vision   # run the daemon by hand
 make install-server / make restart / make logs
 ```

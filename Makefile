@@ -5,7 +5,7 @@ BIN  := $(HOME)/.local/bin
 LIB  := $(HOME)/.local/lib/local-models
 PYTHON ?= $(shell which python3)
 
-.PHONY: install install-server menubar install-menubar uninstall status restart logs test
+.PHONY: install install-server menubar install-menubar dmg uninstall status restart logs test
 
 ## Copy cli/ and server/ to $(LIB), link the CLIs onto PATH, and seed the
 ## registry if none exists. Rerun after every change to cli/ or server/.
@@ -47,6 +47,11 @@ install-menubar: menubar
 	rm -rf "/Applications/Local Models.app"
 	cp -R "dist/Local Models.app" "/Applications/Local Models.app"
 	open "/Applications/Local Models.app"
+
+## Package the menu-bar app as dist/release/LocalModels-<version>-macos-arm64.dmg
+## (ad-hoc signed, with SHA256SUMS and RELEASE_NOTES.md). Uploads nothing.
+dmg:
+	sh scripts/make-dmg.sh
 
 uninstall:
 	rm -f $(BIN)/local-model $(BIN)/local-image
