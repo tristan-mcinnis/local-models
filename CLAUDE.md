@@ -23,6 +23,10 @@ the daemon owns the weights, the loading, and the memory. Thin clients only.
   menu-bar app. `registry/models.example.json`: registry shape.
 - `~/Models/models.json` (outside git) is the live registry; `~/Models/` holds
   weights.
+- `requirements.txt`: the Python packages, one per feature (the daemon core is
+  stdlib only). `THIRD_PARTY_NOTICES.md`: credits and licenses; update it when
+  a dependency or an example model changes. `docs/personal-setup.md`: how this
+  runs on the author's Mac (launchd labels, which House apps call it).
 
 ## Build, test, run
 
