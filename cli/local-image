@@ -13,8 +13,6 @@ import sys
 import urllib.error
 from pathlib import Path
 
-import jsonschema
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "server"))
 from common import RegistryError, daemon_base_url, http_error_detail, http_json, load_registry  # noqa: E402
 from common import resolve_model as _resolve_model  # noqa: E402
@@ -173,7 +171,20 @@ def cmd_ui(args) -> None:
     )
 
 
+def load_jsonschema():
+    """jsonschema is needed only by `extract`, so ocr, describe and ui run without it."""
+    try:
+        import jsonschema
+    except ImportError:
+        raise SystemExit(
+            "local-image extract needs the jsonschema package: "
+            "python3 -m pip install jsonschema (or -r requirements.txt)"
+        )
+    return jsonschema
+
+
 def cmd_extract(args) -> None:
+    jsonschema = load_jsonschema()
     image = Path(args.image).expanduser()
     try:
         schema = json.loads(Path(args.schema).expanduser().read_text())

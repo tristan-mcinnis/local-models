@@ -1,0 +1,24 @@
+# Python packages for local-models. The daemon itself (server/serve.py) uses
+# only the standard library; each package below is needed by one feature.
+#
+# Install into the python3 that runs the daemon AND into the first python3 on
+# PATH (the CLIs use `#!/usr/bin/env python3`):
+#   python3 -m pip install -r requirements.txt
+#
+# llama-server (completion) and Tesseract (OCR fallback) are not Python
+# packages: brew install llama.cpp tesseract
+
+# Vision backend: the daemon spawns `python -m uvicorn mlx_vlm.server:app`.
+# Apple Silicon only. Pulls in mlx, fastapi and uvicorn.
+mlx-vlm
+
+# `local-model pull` (downloads from Hugging Face).
+huggingface_hub
+
+# `local-image extract` (schema validation). Imported lazily: ocr, describe
+# and ui run without it.
+jsonschema
+
+# Apple Vision OCR in `local-image ocr`. Without it, OCR falls back to Tesseract.
+pyobjc-framework-Vision; sys_platform == "darwin"
+pyobjc-framework-Quartz; sys_platform == "darwin"
