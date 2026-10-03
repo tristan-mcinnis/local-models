@@ -135,6 +135,12 @@ xattr -dr com.apple.quarantine "/Applications/Local Models.app"
 
 Each release is signed ad hoc. After an update, macOS may ask again for permissions such as Accessibility or Microphone.
 
+Check the download against `SHA256SUMS` on the release page:
+
+```bash
+shasum -a 256 -c SHA256SUMS
+```
+
 ### Build from source and install
 
 The daemon and the CLIs always install this way.
