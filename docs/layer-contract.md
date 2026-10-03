@@ -35,7 +35,7 @@ Completion reached 3 on 2026-08-29: the daemon manages a llama-server
 app routes to it behind a user toggle with its in-process engine as the
 off-switch fallback. Transcription stays at 1. Local Dictation will not
 adopt it: it keeps its models in process for latency, a named exception to
-the one serving layer (house-system `docs/vision.md`).
+the one serving layer.
 
 ## Server ownership
 
@@ -101,9 +101,10 @@ The daemon is one of the house apps, so it publishes what it can be asked to
 do: `server/commands.py` writes a manifest to
 `~/Library/Application Support/House/commands/models.json` at startup, naming
 the `http` transport, the address being served, the status route, and the two
-safe commands (warm a model, unload a model). The contract is
-`design-system/docs/app-commands.md`; the README's "House commands" section
-records the three `http` details that contract leaves open.
+safe commands (warm a model, unload a model). The house command contract
+fixes the file and the status document; the README's "House commands"
+section describes the manifest and records the three `http` details that
+contract leaves open.
 
 Two rules hold here as everywhere: the status document is derived from the same
 model state `/v1/models` reports, never a second source of truth, and a
@@ -113,7 +114,8 @@ extra; losing it never costs the serving.
 ## Extending
 
 New capability = one backend file + registry entries + (optionally) a client
-method. Candidates in order of pull: TTS (served today by local-tts's own
-service on 127.0.0.1:8081, not through this daemon), embeddings, reranking,
+method. Candidates in order of pull: TTS (served today by
+[Local TTS](https://github.com/tristan-mcinnis/local-tts)'s own service on
+127.0.0.1:8081, not through this daemon), embeddings, reranking,
 structured extraction as a first-class endpoint. The test for adding one: an app wants it
 through the daemon, not a benchmark wants it to exist.

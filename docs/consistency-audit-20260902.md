@@ -27,9 +27,8 @@ local-dictation) build on one contract.
 - **Stale docs.** README said completion was phase 2 and returned 501; the
   example registry called the completion entry a phase-2 backend.
 - **No CLAUDE.md / AGENTS.md.** GATES.md and `.unlazy/` are gitignored
-  build ledgers from the 2026-08-29 session, not a contract.
-- **Repo is PUBLIC** (`public_ok` recorded in code-atlas; GATES G8 verified
-  it). The lead's brief said private; the atlas is right.
+  build ledgers from the first build session, not a contract.
+- **Repo is public**, so every tracked file must be safe to publish.
 - No secrets or personal paths in tracked files (`tests/scrub.sh` clean).
   `dist/` and `.build/` are ignored, not committed.
 
@@ -73,12 +72,13 @@ local-dictation) build on one contract.
   an OpenAI passthrough (`POST /v1/chat/completions`, `GET /v1/openai/models`)
   that resolves registry ids, readies the backend, and relays the stream
   byte-for-byte, so Quick Launch can target `http://127.0.0.1:8078/v1` with
-  model id `qwen3-vl` (the registry default). Repointing Quick Launch is the
-  lead's change in that repo.
-- The vision server has two starters: the separate launchd agent
-  `com.tristan.mlx-vlm-server` and the daemon's `--ensure-vision` spawn.
-  Adopt-or-spawn is documented and works; it stays.
-- Live registry carries `pocket-tts` and `mlx-audio-stt` entries the daemon
+  model id `qwen3-vl` (the registry default). Repointing Quick Launch is a
+  change in that repo.
+- The vision server had two starters: a separate launchd agent for the
+  mlx-vlm server and the daemon's `--ensure-vision` spawn. Adopt-or-spawn is
+  documented and works; it stays. (Later settled by `server.launch_agent`,
+  see the layer contract's "Server ownership".)
+- A live registry can carry `pocket-tts` and `mlx-audio-stt` entries the daemon
   cannot serve; they show as `backend_available: false` with an "unknown
   backend" detail for TTS. Honest, left as is.
 - `local-image extract` against the UI schema on the synthetic fixture fails

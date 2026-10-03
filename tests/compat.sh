@@ -1,6 +1,6 @@
 #!/bin/sh
 # Backward-compat: the deployed CLIs keep the verb surface existing callers use
-# (Pi local-image-analysis skill, Quick Launch, benchmark scripts), resolved
+# (agent skills, Quick Launch, benchmark scripts), resolved
 # against the LIVE registry.
 set -e
 
