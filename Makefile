@@ -1,6 +1,6 @@
 REPO := $(shell pwd)
 BIN  := $(HOME)/.local/bin
-# Installed runtime. launchd jobs (the daemon, and cos/Ledger calling the CLIs)
+# Installed runtime. launchd jobs (the daemon, and any job calling the CLIs)
 # may not read ~/Documents, so they run this copy, never the checkout.
 LIB  := $(HOME)/.local/lib/local-models
 PYTHON ?= $(shell which python3)
@@ -39,6 +39,7 @@ menubar:
 	cp menubar/LocalModelsBar/Info.plist "dist/Local Models.app/Contents/Info.plist"
 	mkdir -p "dist/Local Models.app/Contents/Resources"
 	cp menubar/LocalModelsBar/Resources/AppIcon.icns "dist/Local Models.app/Contents/Resources/AppIcon.icns"
+	cp LICENSE THIRD_PARTY_NOTICES.md "dist/Local Models.app/Contents/Resources/"
 	@echo "built: dist/Local Models.app"
 
 ## Copy the menu-bar app to /Applications and launch it.
