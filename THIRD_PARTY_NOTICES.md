@@ -8,9 +8,9 @@ against the project's own license file.
 
 This repository bundles **no third-party code, libraries, model weights or
 fonts**. The Python daemon and CLIs use only the standard library at their
-core. The two Swift packages (`client/swift/LocalModelClient` and
-`menubar/LocalModelsBar`) have no package dependencies; they link only Apple
-system frameworks (Foundation, AppKit, SwiftUI, ServiceManagement).
+core. The Swift package `menubar/LocalModelsBar` has no package dependencies;
+it links only Apple system frameworks (Foundation, AppKit, SwiftUI,
+ServiceManagement).
 
 Code reused from the author's own projects, under the same MIT license and
 the same copyright holder:

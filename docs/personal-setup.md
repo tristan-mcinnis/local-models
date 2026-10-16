@@ -36,8 +36,7 @@ install leaves `launch_agent` out and lets the daemon spawn the server.
   This is why `make install` copies the runtime to `~/.local/lib/local-models`:
   launchd jobs may not read `~/Documents`.
 
-No House app imports `LocalModelClient` yet. Each speaks the wire format
-directly.
+Each House app speaks the HTTP wire format directly; there is no client library.
 
 Local Dictation is not a client by decision. It keeps its models in process
 for latency and shares only the `~/Models/` weight store. The House vision

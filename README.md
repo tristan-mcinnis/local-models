@@ -76,7 +76,6 @@ does this by design.
 - **Idle unloading**: a model nobody has used for 30 minutes is unloaded, so a
   forgotten warm model stops holding gigabytes of RAM.
 - **A menu-bar app** that shows which models are warm and loads or unloads them.
-- **A small Swift client** for native apps.
 
 ### Design rules
 
@@ -90,7 +89,7 @@ does this by design.
 
 - A Mac with Apple Silicon. The vision backend uses [MLX](https://github.com/ml-explore/mlx),
   which runs only on Apple Silicon.
-- macOS 14 or later for the menu-bar app (macOS 13 or later for the Swift client).
+- macOS 14 or later for the menu-bar app.
 - Python 3.11 or later with the packages in [requirements.txt](requirements.txt):
   [mlx-vlm](https://github.com/Blaizzy/mlx-vlm) for the vision backend,
   `huggingface_hub` for `pull`, `jsonschema` for `local-image extract`, and
@@ -311,12 +310,14 @@ runs its own OpenAI-compatible service on `127.0.0.1:8081`
 the registry; the daemon does not proxy it, so its row in `/v1/models` reads
 `backend_available: false` and clients call 8081 directly.
 
-### Swift client
+### HTTP contract
 
-A minimal Swift client for native apps ships in
-[client/swift/LocalModelClient](client/swift/LocalModelClient). Every non-200
-reply becomes `ClientError` (`notImplemented` for 501, `badResponse` otherwise)
-carrying the daemon's error body.
+The HTTP API is the interface. There is no client library: an app calls the
+daemon at `http://127.0.0.1:8078` and speaks the routes in the table above
+(`/health`, `/v1/models`, `/v1/status`, `/v1/choices/model`, `/v1/vision`,
+`/v1/ask`, `/v1/complete`, `/v1/warm`, `/v1/unload`, `/v1/transcribe`,
+`/v1/openai/models`, `/v1/chat/completions`). Every non-200 reply carries the
+`{"error": ...}` envelope described above.
 
 ### House commands
 
@@ -411,7 +412,6 @@ a window.
 
 ```bash
 make test                          # 147 unit tests + daemon smoke + publish scrub
-cd client/swift/LocalModelClient && swift build && swift test
 cd menubar/LocalModelsBar && swift build && swift test
 make menubar                       # app bundle in dist/
 make dmg                           # release DMG + SHA256SUMS in dist/release/

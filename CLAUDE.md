@@ -19,8 +19,8 @@ the daemon owns the weights, the loading, and the memory. Thin clients only.
 - `make install` copies `cli/` and `server/` to `~/.local/lib/local-models`
   (commit in `SOURCE_COMMIT`); the PATH links and the launchd daemon run that
   copy, because launchd jobs may not read `~/Documents`.
-- `client/swift/LocalModelClient`: Swift client. `menubar/LocalModelsBar`:
-  menu-bar app. `registry/models.example.json`: registry shape.
+- `menubar/LocalModelsBar`: menu-bar app. `registry/models.example.json`:
+  registry shape.
 - `~/Models/models.json` (outside git) is the live registry; `~/Models/` holds
   weights.
 - `requirements.txt`: the Python packages, one per feature (the daemon core is
@@ -34,7 +34,6 @@ the daemon owns the weights, the loading, and the memory. Thin clients only.
 make test                          # unit tests + daemon smoke + publish scrub
 sh tests/compat.sh                 # live gate: deployed CLIs against ~/Models (read-only)
 python3 tests/roundtrip_pull.py    # network: real HF pull into a temp home
-cd client/swift/LocalModelClient && swift build && swift test
 cd menubar/LocalModelsBar && swift build
 make dmg                           # release DMG + SHA256SUMS in dist/release/ (ad hoc, uploads nothing)
 python3 server/serve.py --ensure-vision   # run the daemon by hand
@@ -45,10 +44,10 @@ compat.sh and roundtrip_pull.py need a `python3` with huggingface_hub and
 pyobjc first on PATH (the interpreter in the daemon plist has both); under a
 bare conda `python3` the pull fails and OCR falls back to Tesseract.
 
-Run `make test` after any Python change. Run both Swift builds (and the
-client's `swift test`) after any Swift change. After a server or CLI change run `make install && make restart`
-(restart alone reruns the old installed copy) and check `local-model status`
-before calling it done.
+Run `make test` after any Python change. Run the menu-bar `swift build`
+after any Swift change. After a server or CLI change run
+`make install && make restart` (restart alone reruns the old installed copy) and check
+`local-model status` before calling it done.
 
 ## Rules
 
