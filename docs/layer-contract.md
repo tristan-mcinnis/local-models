@@ -18,7 +18,8 @@ One machine, many tiny models, one owner of their lifecycle.
 - **Shared plumbing (`server/common.py`)** — the one definition of the
   registry location, model resolution, the daemon URL, and proxy-free JSON
   over HTTP. Daemon, backends, and CLIs all import it.
-- **Clients (`client/`)** — thin per-language wrappers. Apps never load
+- **HTTP API (the daemon)** — the interface for apps. No per-language
+  client wrappers; callers speak HTTP to the daemon directly. Apps never load
   weights, never shell out to model runtimes, never hardcode paths.
 
 ## Capability lifecycle
