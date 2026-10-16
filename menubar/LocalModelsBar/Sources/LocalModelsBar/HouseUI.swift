@@ -1,14 +1,12 @@
-// Copied from memory-menubar/Sources/MemoryBar/HouseUI.swift (2026-09-03),
-// which itself came from cotype/Sources/CotypeMenuApp/HouseUI.swift, the first
-// Slate menu-bar app. This is the shared component kit — panel glass, icon
-// tile, key caps, status dot, ink toggle, cards, rows, footer well, rail,
-// segmented control — and Local Models uses it unchanged so the three menu
-// bars are one look. Fix a component here and in Cotype and Memory in the same
-// session, or the family drifts.
+// SHARED KIT, DO NOT EDIT. Source: design-system/kit/HouseUI.swift.
+// Copy from design-system (`make sync-kit` there); `make check-consumers`
+// fails when a consumer's copy differs.
 //
-// Every value comes from `House` (generated from design-system/tokens.json);
-// nothing in this file retypes a token. See design-system/DESIGN.md for the
-// rule these components follow.
+// The Slate component kit for the house menu-bar apps: panel glass, icon tile,
+// key caps, status dot, ink toggle, cards, rows, footer well, rail, segmented
+// control. Every value comes from `House` (generated from
+// design-system/tokens.json); nothing in this file retypes a token. See
+// design-system/DESIGN.md for the rule these components follow.
 
 import SwiftUI
 import AppKit
@@ -47,7 +45,7 @@ enum AppearancePreference: String, CaseIterable, Identifiable {
         AppearancePreference(rawValue: UserDefaults.standard.string(forKey: key) ?? "") ?? .dark
     }
 
-    /// Apply to the whole app, so every Local Models window (settings, menu-bar panel) resolves the same tokens.
+    /// Apply to the whole app, so every app window (settings, menu-bar panel) resolves the same tokens.
     @MainActor
     static func applyCurrent() {
         NSApp.appearance = current.nsAppearance
@@ -70,7 +68,7 @@ extension View {
 
 // MARK: - Glass
 
-/// The blur material behind `panelTint` on every floating Local Models panel.
+/// The blur material behind `panelTint` on every floating app panel.
 struct HouseBlur: NSViewRepresentable {
     func makeNSView(context: Context) -> NSVisualEffectView {
         let view = NSVisualEffectView()
@@ -229,7 +227,7 @@ struct IconTile: View {
     }
 }
 
-/// The one piece of colour on any Local Models surface: a status dot. Always paired
+/// The one piece of colour on any app surface: a status dot. Always paired
 /// with a word, never colour alone.
 struct StatusDot: View {
     var tint: Color = House.ColorToken.success
@@ -401,7 +399,7 @@ struct InkToggleStyle: ToggleStyle {
     }
 }
 
-/// A toggle for a capability Local Models cannot honour yet: shown, off, and inert.
+/// A toggle for a capability the app cannot honour yet: shown, off, and inert.
 struct InertToggle: View {
     var body: some View {
         InkSwitchTrack(isOn: false, enabled: false)

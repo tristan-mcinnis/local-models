@@ -6,8 +6,8 @@ import PackageDescription
 // registry. It stores nothing of its own.
 let package = Package(
     name: "LocalModelsBar",
-    // The Slate menu-bar kit (HouseUI, MenuBarPanel) is shared with Cotype and
-    // Memory, which are macOS 14 apps.
+    // The Slate menu-bar kit (HouseUI, MenuBarPanel) is shared with Cotype,
+    // Memory and Usage, which are macOS 14 apps.
     platforms: [.macOS(.v14)],
     targets: [
         .executableTarget(name: "LocalModelsBar"),

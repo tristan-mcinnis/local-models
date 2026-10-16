@@ -45,17 +45,6 @@ struct ModelList: Decodable {
     let models: [ModelRow]
 }
 
-/// One selectable row in the panel that is not a model: a verb.
-struct PanelAction: Identifiable {
-    let id: String
-    let glyph: String
-    let title: String
-    /// The chord drawn as key caps on the right. Empty draws none.
-    var chord: String = ""
-    var isEnabled: Bool = true
-    var run: () -> Void = {}
-}
-
 /// The launchd agent that is the daemon. Local Models drives a job it does not
 /// own, so both verbs go through `launchctl` rather than through the HTTP API:
 /// the daemon has no stop route, and it is `KeepAlive`, so killing the process
