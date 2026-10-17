@@ -1,19 +1,20 @@
 import AppKit
 import XCTest
 @testable import LocalModelsBar
+import HouseUIKit
 
 /// The keys the panel controller routes, driven through the real controller
 /// and a real model without opening a window or calling the daemon.
 @MainActor
 final class MenuPanelKeysTests: XCTestCase {
 
-    private func key(_ code: UInt16, _ chars: String = "", flags: NSEvent.ModifierFlags = []) throws -> KeyPress {
+    private func key(_ code: UInt16, _ chars: String = "", flags: NSEvent.ModifierFlags = []) throws -> PanelKeyPress {
         let event = try XCTUnwrap(NSEvent.keyEvent(
             with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0,
             windowNumber: 0, context: nil, characters: chars, charactersIgnoringModifiers: chars,
             isARepeat: false, keyCode: code
         ))
-        return KeyPress(event)
+        return PanelKeyPress(event)
     }
 
     private func makeController() -> (MenuBarPanelController, PanelModel) {

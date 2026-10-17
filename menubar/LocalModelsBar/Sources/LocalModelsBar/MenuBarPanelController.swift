@@ -1,4 +1,5 @@
 import AppKit
+import HouseUIKit
 
 extension PanelModel: MenuPanelModeling {}
 
@@ -21,7 +22,7 @@ final class MenuBarPanelController: MenuPanelController<MenuBarPanelView, PanelM
 
     /// The command chords are handled here rather than as SwiftUI shortcuts so
     /// they fire wherever focus sits inside the panel.
-    override func handle(_ key: KeyPress) -> Bool {
+    override func handle(_ key: PanelKeyPress) -> Bool {
         if key.flags.contains(.command) {
             if key.keyCode == 36 || key.keyCode == 76 {
                 model.unloadSelection()

@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import HouseUIKit
 
 /// One model as the daemon reports it on `GET /v1/models`.
 struct ModelRow: Decodable, Identifiable, Equatable {

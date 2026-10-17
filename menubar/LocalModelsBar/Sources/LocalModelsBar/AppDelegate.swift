@@ -1,5 +1,7 @@
 import AppKit
 import SwiftUI
+import HouseDesign
+import HouseUIKit
 
 /// Menu-bar app delegate. Owns the status item, the panel, the polling model,
 /// and the settings window. Local Models is an `.accessory` app: no Dock icon,

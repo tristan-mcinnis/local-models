@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import HouseDesign
 
 // Offscreen render proof. `LocalModelsBar --render-proof <dir>` draws every
 // Slate surface into PNGs without putting a window on screen, so the design can

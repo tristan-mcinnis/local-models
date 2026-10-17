@@ -55,7 +55,9 @@ row talks to 8081 directly.
 - The House command contract (`design-system/docs/app-commands.md`) defines
   the manifest file and the status document that `server/commands.py` writes.
 - The Slate visual rule (`design-system/DESIGN.md`) and `tokens.json` generate
-  `HouseDesign.swift`. Refresh it from design-system; do not edit it by hand.
+  the `HouseDesign` package product, and the menu-bar kit is the `HouseUIKit`
+  product. `menubar/LocalModelsBar/Package.swift` pins the package by GitHub URL
+  and tag; raise the pin to take a change, never copy files in.
 - `.claude/hooks/` run `design-system/bin/design-lint` when this repo sits in
   the House checkout. Outside it they exit quietly.
 

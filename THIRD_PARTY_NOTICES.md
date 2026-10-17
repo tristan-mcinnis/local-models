@@ -17,8 +17,8 @@ the same copyright holder:
 
 | File | Origin |
 |---|---|
-| `menubar/LocalModelsBar/Sources/LocalModelsBar/HouseDesign.swift` | Generated from the House design system tokens. |
-| `menubar/LocalModelsBar/Sources/LocalModelsBar/HouseUI.swift`, `MenuBarPanel.swift`, `SettingsView.swift`, `RenderProof.swift` | The shared House menu-bar kit, by the same author. |
+| `HouseDesign` and `HouseUIKit` products of the design-system package (pinned in `menubar/LocalModelsBar/Package.swift`) | The House design system tokens and the shared House menu-bar kit, by the same author. |
+| `menubar/LocalModelsBar/Sources/LocalModelsBar/SettingsView.swift`, `RenderProof.swift` | Settings shell and render proof on the shared House menu-bar kit, by the same author. |
 | `menubar/LocalModelsBar/Sources/LocalModelsBar/AppActivation.swift` | Copied from [Quick Launch](https://github.com/tristan-mcinnis/quick-launch) (`Sources/App/AppActivation.swift`), written by the same author. |
 | `menubar/LocalModelsBar/Resources/AppIcon.icns`, `docs/icon.png` | Drawn for this project in the House icon style. |
 
