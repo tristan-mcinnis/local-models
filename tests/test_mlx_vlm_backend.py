@@ -233,10 +233,10 @@ class EnsureTests(EnsureTestBase):
             backend._spawn_target()
 
     def test_spawn_target_keeps_loopback_bind_for_localhost(self):
-        backend = make_backend(base_url="http://localhost:8081")
+        backend = make_backend(base_url="http://localhost:8090")
         host, port = backend._spawn_target()
         self.assertEqual(host, "127.0.0.1")
-        self.assertEqual(port, 8081)
+        self.assertEqual(port, 8090)
 
     def test_base_url_parsing_rejects_https(self):
         backend = make_backend(base_url="https://127.0.0.1:8080")

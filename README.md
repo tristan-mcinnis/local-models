@@ -304,12 +304,6 @@ and stops it. Thinking is disabled at spawn (`enable_thinking: false`) so
 completion models return raw continuation tokens, never reasoning.
 
 
-Text to speech is not served by this daemon. [Local TTS](https://github.com/tristan-mcinnis/local-tts)
-runs its own OpenAI-compatible service on `127.0.0.1:8081`
-(`/v1/audio/speech`). You can list it in `~/Models/models.json` so it shows in
-the registry; the daemon does not proxy it, so its row in `/v1/models` reads
-`backend_available: false` and clients call 8081 directly.
-
 ### HTTP contract
 
 The HTTP API is the interface. There is no client library: an app calls the
@@ -365,11 +359,6 @@ state and switch in the header, one 36 px row per registered model with its
 capabilities and whether it is warm, Return to load and ⌘Return to unload,
 then Refresh (⌘R) and Open registry. It talks only to the daemon and to the
 daemon's launchd job.
-
-A VOICE row shows whether [Local TTS](https://github.com/tristan-mcinnis/local-tts)
-answers on `127.0.0.1:8081`; Return on it speaks a short greeting. Without
-Local TTS installed, that row reads unreachable and the rest of the panel
-works as normal.
 
 The menu bar is the daemon's face, not its owner: the daemon holds the
 registry, the weights, and every load and unload, and the panel only asks it.
@@ -435,7 +424,6 @@ Local Models is one of a small family of free, local-first Mac tools that share 
 |---|---|
 | [Quick Launch](https://github.com/tristan-mcinnis/quick-launch) | Keyboard-first launcher and instant AI overlay. |
 | [Local Dictation](https://github.com/tristan-mcinnis/local-dictation) | Hold a key, talk, and on-device text lands at your cursor. |
-| [Local TTS](https://github.com/tristan-mcinnis/local-tts) | Fast on-device voice cloning and text-to-speech. |
 | **[Local Models](https://github.com/tristan-mcinnis/local-models)** | One local daemon that serves a fleet of small models to every app. |
 | [Usage](https://github.com/tristan-mcinnis/usage-menubar) | One menu-bar gauge for every AI subscription and API key. |
 | [RTI](https://github.com/tristan-mcinnis/rti) | Meeting recorder with live transcription and a real-time copilot. |

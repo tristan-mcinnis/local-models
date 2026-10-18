@@ -115,8 +115,6 @@ extra; losing it never costs the serving.
 ## Extending
 
 New capability = one backend file + registry entries + (optionally) a CLI
-subcommand. Candidates in order of pull: TTS (served today by
-[Local TTS](https://github.com/tristan-mcinnis/local-tts)'s own service on
-127.0.0.1:8081, not through this daemon), embeddings, reranking,
+subcommand. Candidates in order of pull: embeddings, reranking,
 structured extraction as a first-class endpoint. The test for adding one: an app wants it
 through the daemon, not a benchmark wants it to exist.

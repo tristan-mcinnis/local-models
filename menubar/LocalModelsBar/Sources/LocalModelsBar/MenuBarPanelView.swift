@@ -106,79 +106,6 @@ struct ModelPanelRow: View {
     }
 }
 
-/// The one VOICE row: local-tts's own glyph, id and endpoint, and a status
-/// pill in place of the model rows' warm chip. Return speaks a short
-/// greeting through the service.
-struct VoicePanelRow: View {
-    let isSelected: Bool
-    let isBusy: Bool
-    let isReady: Bool
-    let detail: String
-    let onHover: () -> Void
-    let onTap: () -> Void
-
-    @Environment(\.colorScheme) private var scheme
-
-    var body: some View {
-        Button(action: onTap) {
-            HStack(spacing: House.Spacing.sm) {
-                IconTile(symbol: "waveform")
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Local TTS")
-                        .font(House.TypeToken.label)
-                        .foregroundStyle(House.ColorToken.textPrimary)
-                        .lineLimit(1)
-                    Text(detail)
-                        .font(House.TypeToken.meta)
-                        .foregroundStyle(House.ColorToken.textTertiary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                }
-                Spacer(minLength: House.Spacing.xs)
-                trailing
-            }
-            .padding(.horizontal, House.Spacing.sm)
-            .frame(height: House.Control.railRow)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(background)
-            .contentShape(Rectangle())
-            .opacity(isReady ? 1 : 0.45)
-        }
-        .buttonStyle(.plain)
-        .disabled(!isReady)
-        .onHover { if $0 { onHover() } }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Local TTS, \(isReady ? "ready" : "down")")
-        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
-    }
-
-    @ViewBuilder
-    private var trailing: some View {
-        if isBusy {
-            Text("Speaking…")
-                .font(House.TypeToken.meta)
-                .foregroundStyle(House.ColorToken.textTertiary)
-        } else if isReady {
-            StatusPill(text: "Ready", tint: House.ColorToken.success)
-        } else {
-            StatusPill(text: "Down", tint: House.ColorToken.danger)
-        }
-    }
-
-    @ViewBuilder
-    private var background: some View {
-        let shape = RoundedRectangle(cornerRadius: House.Radius.row, style: .continuous)
-        if isSelected && isReady {
-            shape
-                .fill(House.ColorToken.selectionFill)
-                .overlay(shape.strokeBorder(House.ColorToken.selectionRing, lineWidth: House.hairline))
-                .houseShadow(House.Shadow.selection, dark: scheme == .dark)
-        } else {
-            shape.fill(Color.clear)
-        }
-    }
-}
-
 // MARK: - The panel
 
 struct MenuBarPanelView: View {
@@ -292,19 +219,6 @@ struct MenuBarPanelView: View {
                     glyphWidth: House.Control.tile
                 )
             }
-            SlateDivider().padding(.vertical, House.Spacing.xxs)
-            PanelSectionLabel(text: "Voice", topPadding: House.Spacing.xxs)
-            VoicePanelRow(
-                isSelected: model.selection == model.voiceRowIndex,
-                isBusy: model.busy == "local-tts",
-                isReady: model.ttsUp,
-                detail: model.voiceDetail,
-                onHover: { model.selection = model.voiceRowIndex },
-                onTap: {
-                    model.selection = model.voiceRowIndex
-                    model.runSelection()
-                }
-            )
         }
         .padding(.horizontal, House.Spacing.xs)
         .padding(.vertical, House.Spacing.xs)

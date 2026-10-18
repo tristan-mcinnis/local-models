@@ -67,20 +67,18 @@ enum RenderProof {
         return try! JSONDecoder().decode(ModelList.self, from: Data(json.utf8)).models
     }()
 
-    /// The daemon running with a warm model, and local-tts answering ready —
-    /// the VOICE row shows its "Ready" chip alongside the model rows.
+    /// The daemon running with a warm model.
     static func runningModel() -> PanelModel {
         let model = PanelModel()
-        model.override(models: registry, daemonUp: true, ttsUp: true)
+        model.override(models: registry, daemonUp: true)
         model.selection = 0
         return model
     }
 
-    /// The daemon down and local-tts unreachable — the VOICE row shows
-    /// "Down" beside the empty registry note.
+    /// The daemon down: the empty registry note in place of the rows.
     static func downModel() -> PanelModel {
         let model = PanelModel()
-        model.override(models: [], daemonUp: false, ttsUp: false)
+        model.override(models: [], daemonUp: false)
         model.selection = 0
         return model
     }

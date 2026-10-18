@@ -450,8 +450,8 @@ class OpenAIPassthroughTests(unittest.TestCase):
         registry = json.loads((home / "models.json").read_text())
         registry["server"]["base_url"] = f"http://127.0.0.1:{cls.fake.server_address[1]}"
         registry["aliases"]["vision"] = "fake"
-        registry["aliases"]["tts"] = "voice"
-        registry["models"]["voice"] = {"path": str(home / "voice"), "backend": "pocket-tts", "capabilities": ["tts"]}
+        registry["aliases"]["stt"] = "ears"
+        registry["models"]["ears"] = {"path": str(home / "ears"), "backend": "mlx-audio-stt", "capabilities": ["transcription"]}
         serve.Handler.registry = registry
         serve.Handler.backend_cache = {}
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), serve.Handler)

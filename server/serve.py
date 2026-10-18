@@ -652,7 +652,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def get_openai_models(self) -> None:
         """OpenAI `GET /v1/models` shape: ids plus aliases of every model whose
-        backend can answer /v1/chat/completions (TTS / STT entries stay out)."""
+        backend can answer /v1/chat/completions (STT entries stay out)."""
         models = {}
         for key, model in self.registry.get("models", {}).items():
             try:

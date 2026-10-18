@@ -116,17 +116,9 @@ final class PanelModel: ObservableObject {
     @Published private(set) var busy: String?
     @Published var selection: Int = 0
 
-    /// Whether the local-tts service at `ttsBase` answered `GET /health` ok,
-    /// polled on the same timer as the daemon.
-    @Published private(set) var ttsUp = false
-
     // MARK: Collaborators
 
     private let base = URL(string: "http://127.0.0.1:8078")!
-    /// local-tts: the TTS organ of the local layer, always on 8081.
-    private let ttsBase = URL(string: "http://127.0.0.1:8081")!
-    /// The voice local-tts serves by default; shown in the VOICE row's detail.
-    static let ttsVoice = "vctk-p225"
     private var pollTimer: Timer?
     private let defaults: UserDefaults
 
@@ -185,12 +177,6 @@ final class PanelModel: ObservableObject {
         return "Daemon running · \(warmCount) warm"
     }
 
-    /// The VOICE row's detail: where local-tts answers and which voice it
-    /// speaks with.
-    var voiceDetail: String {
-        "\(ttsBase.host ?? "127.0.0.1"):\(ttsBase.port ?? 8081) · \(Self.ttsVoice)"
-    }
-
     /// The dim second line under the header: where the daemon answers, or why
     /// it cannot be reached.
     var context: String? {
@@ -222,11 +208,8 @@ final class PanelModel: ObservableObject {
         ]
     }
 
-    /// Model rows first, then the second group, then the one VOICE row, then
-    /// the two footer buttons.
-    var rowCount: Int { models.count + moreActions.count + 1 }
-    /// The VOICE row's selection index: right after the second group.
-    var voiceRowIndex: Int { models.count + moreActions.count }
+    /// Model rows first, then the second group, then the two footer buttons.
+    var rowCount: Int { models.count + moreActions.count }
     var footerSelectionBase: Int { rowCount }
     private var selectionCount: Int { rowCount + 2 }
 
@@ -251,11 +234,6 @@ final class PanelModel: ObservableObject {
             let action = moreActions[actionIndex]
             guard action.isEnabled else { return }
             action.run()
-            return
-        }
-        if selection == voiceRowIndex {
-            guard ttsUp, busy == nil else { return }
-            Task { await speakVoiceGreeting() }
             return
         }
         if selection == footerSelectionBase { onOpenSettings() } else { onQuit() }
@@ -367,22 +345,16 @@ final class PanelModel: ObservableObject {
         Task { await refresh() }
     }
 
-    /// Refreshes the daemon's registry and local-tts's health together, on
-    /// the same poll tick, so the VOICE row never needs its own timer.
     func refresh() async {
         isRefreshing = true
         defer { isRefreshing = false }
-        async let modelsFetch = fetchModels()
-        async let voiceFetch = fetchVoiceHealth()
-        let (fetchedModels, voiceUp) = await (modelsFetch, voiceFetch)
-        if let fetchedModels {
+        if let fetchedModels = await fetchModels() {
             models = fetchedModels
             daemonUp = true
         } else {
             models = []
             daemonUp = false
         }
-        ttsUp = voiceUp
         lastPolledAt = now()
         clampSelection()
         onStateChange()
@@ -397,20 +369,6 @@ final class PanelModel: ObservableObject {
             return try JSONDecoder().decode(ModelList.self, from: data).models
         } catch {
             return nil
-        }
-    }
-
-    private struct HealthResponse: Decodable { let status: String }
-
-    private func fetchVoiceHealth() async -> Bool {
-        do {
-            var request = URLRequest(url: ttsBase.appendingPathComponent("health"))
-            request.timeoutInterval = 3
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard (response as? HTTPURLResponse)?.statusCode == 200 else { return false }
-            return try JSONDecoder().decode(HealthResponse.self, from: data).status == "ok"
-        } catch {
-            return false
         }
     }
 
@@ -430,46 +388,6 @@ final class PanelModel: ObservableObject {
         busy = id
         await post("v1/unload", body: ["model": id], timeout: 30)
         busy = nil
-    }
-
-    // MARK: - Voice
-
-    /// Return on the VOICE row: synthesise a short greeting through local-tts
-    /// and play it. No shell — `afplay` runs from a fixed argv, never a
-    /// string built from anything the service returned.
-    func speakVoiceGreeting() async {
-        busy = "local-tts"
-        defer { busy = nil }
-        do {
-            var request = URLRequest(url: ttsBase.appendingPathComponent("v1/audio/speech"))
-            request.httpMethod = "POST"
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = try JSONSerialization.data(withJSONObject: [
-                "input": "Local TTS is ready.",
-                "voice": "\(Self.ttsVoice).wav",
-                "response_format": "wav",
-            ])
-            request.timeoutInterval = 15
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard (response as? HTTPURLResponse)?.statusCode == 200 else { return }
-            let wavURL = FileManager.default.temporaryDirectory
-                .appendingPathComponent("local-models-voice-\(UUID().uuidString).wav")
-            try data.write(to: wavURL)
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/afplay")
-            process.arguments = [wavURL.path]
-            // One file per press; drop it once it has been played.
-            process.terminationHandler = { _ in try? FileManager.default.removeItem(at: wavURL) }
-            do {
-                try process.run()
-            } catch {
-                try? FileManager.default.removeItem(at: wavURL)
-                throw error
-            }
-        } catch {
-            // Best-effort greeting; the row's status dot already tells the
-            // real story, so a failed speak has nothing further to report.
-        }
     }
 
     private func post(_ path: String, body: [String: Any], timeout: TimeInterval) async {
@@ -507,11 +425,10 @@ final class PanelModel: ObservableObject {
     // MARK: - Render proof seams
 
     /// Fixed state for the offscreen proof, so a PNG never depends on whether
-    /// this Mac happens to be running the daemon or local-tts.
-    func override(models: [ModelRow], daemonUp: Bool, refreshing: Bool = false, ttsUp: Bool = true) {
+    /// this Mac happens to be running the daemon.
+    func override(models: [ModelRow], daemonUp: Bool, refreshing: Bool = false) {
         self.models = models
         self.daemonUp = daemonUp
         self.isRefreshing = refreshing
-        self.ttsUp = ttsUp
     }
 }

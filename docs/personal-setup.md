@@ -42,14 +42,6 @@ Local Dictation is not a client by decision. It keeps its models in process
 for latency and shares only the `~/Models/` weight store. The House vision
 note records this as a named exception to the one serving layer.
 
-## Local TTS
-
-[Local TTS](https://github.com/tristan-mcinnis/local-tts) runs its own
-launchd service on 127.0.0.1:8081 and is registered in `~/Models/models.json`
-as `pocket-tts` with backend `pocket-tts`. The daemon does not serve that
-backend, so the row reads `backend_available: false`. The menu bar's VOICE
-row talks to 8081 directly.
-
 ## House contracts that live in the private design-system repo
 
 - The House command contract (`design-system/docs/app-commands.md`) defines
