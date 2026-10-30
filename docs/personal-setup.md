@@ -28,7 +28,6 @@ install leaves `launch_agent` out and lets the daemon spawn the server.
 - Quick Launch: its local AI provider points at `http://127.0.0.1:8078/v1`
   (the OpenAI passthrough), and it reads the House command manifest to warm
   and unload models from the launcher.
-- Screen context collector (memory-screenctx): `/v1/vision` for enrichment.
 - Cotype: streams completions from the daemon-managed llama-server.
 - RTI: `/v1/vision`.
 - Chief of Staff: `/v1/ask` as a fallback.
