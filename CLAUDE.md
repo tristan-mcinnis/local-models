@@ -30,8 +30,12 @@ the daemon owns the weights, the loading, and the memory. Thin clients only.
 
 ## Build, test, run
 
+Build and test: `make build`, `make test`; warnings are errors. `make test`
+runs the Python suite, then the menu-bar `swift test`.
+
 ```bash
-make test                          # unit tests + daemon smoke + publish scrub
+make build                         # menu-bar swift build (warnings as errors) + Python syntax check
+make test                          # unit tests + daemon smoke + publish scrub + menu-bar swift test
 sh tests/compat.sh                 # live gate: deployed CLIs against ~/Models (read-only)
 python3 tests/roundtrip_pull.py    # network: real HF pull into a temp home
 cd menubar/LocalModelsBar && swift build

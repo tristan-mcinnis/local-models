@@ -5,7 +5,17 @@ BIN  := $(HOME)/.local/bin
 LIB  := $(HOME)/.local/lib/local-models
 PYTHON ?= $(shell which python3)
 
-.PHONY: install install-server menubar install-menubar dmg uninstall status restart logs test
+.PHONY: build install install-server menubar install-menubar dmg uninstall status restart logs test test-python test-swift
+
+# Swift warnings fail the build (a compiler flag, not unsafeFlags in Package.swift).
+SWIFT_STRICT := -Xswiftc -warnings-as-errors
+MENUBAR_PKG  := menubar/LocalModelsBar
+
+## Debug build of the menu-bar package, warnings as errors, plus a Python
+## syntax check of cli/, server/ and tests/ (writes no .pyc). Installs nothing.
+build:
+	cd $(MENUBAR_PKG) && swift build $(SWIFT_STRICT)
+	python3 -c 'import ast,pathlib,sys; fs=[p for d in ("server","tests") for p in pathlib.Path(d).rglob("*.py")]+[pathlib.Path("cli/local-model"),pathlib.Path("cli/local-image")]; [ast.parse(p.read_text(),str(p)) for p in fs]'
 
 ## Copy cli/ and server/ to $(LIB), link the CLIs onto PATH, and seed the
 ## registry if none exists. Rerun after every change to cli/ or server/.
@@ -71,8 +81,14 @@ restart:
 logs:
 	tail -50 $(HOME)/Library/Logs/local-models.log
 
-## Offline unit tests + daemon smoke + publish scrub. Live gates: tests/compat.sh.
-test:
+## Offline unit tests + daemon smoke + publish scrub, then the menu-bar tests
+## (warnings as errors). Live gates: tests/compat.sh.
+test: test-python test-swift
+
+test-python:
 	python3 -m unittest discover -s tests -p "test_*.py"
 	python3 tests/smoke_daemon.py
 	sh tests/scrub.sh
+
+test-swift:
+	cd $(MENUBAR_PKG) && swift test $(SWIFT_STRICT)
