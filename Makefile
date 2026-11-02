@@ -50,13 +50,21 @@ menubar:
 	mkdir -p "dist/Local Models.app/Contents/Resources"
 	cp menubar/LocalModelsBar/Resources/AppIcon.icns "dist/Local Models.app/Contents/Resources/AppIcon.icns"
 	cp LICENSE THIRD_PARTY_NOTICES.md "dist/Local Models.app/Contents/Resources/"
+	@# Sign the whole bundle with the first Apple Development identity, so grants follow one
+	@# identity across installs; ad hoc only when no identity exists (packaging checks).
+	@id=$$(security find-identity -p codesigning -v | awk -F'"' '/Apple Development/{print $$2; exit}'); \
+	codesign --force --sign "$${id:--}" "dist/Local Models.app" && \
+	codesign --verify --strict "dist/Local Models.app" && echo "signed: $${id:-ad hoc}"
 	@echo "built: dist/Local Models.app"
 
 ## Copy the menu-bar app to /Applications and launch it.
 install-menubar: menubar
+	@# Quit the running copy and wait, so the relaunch runs the new build.
+	@osascript -e 'tell application id "com.local-models.menubar" to quit' 2>/dev/null || true
+	@for i in $$(seq 1 15); do pgrep -x LocalModelsBar >/dev/null || break; sleep 1; done
 	rm -rf "/Applications/Local Models.app"
 	cp -R "dist/Local Models.app" "/Applications/Local Models.app"
-	open "/Applications/Local Models.app"
+	open -g "/Applications/Local Models.app"
 
 ## Package the menu-bar app as dist/release/LocalModels-<version>-macos-arm64.dmg
 ## (ad-hoc signed, with SHA256SUMS and RELEASE_NOTES.md). Uploads nothing.
