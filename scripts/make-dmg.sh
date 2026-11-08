@@ -108,7 +108,7 @@ Or, in Terminal:
 xattr -dr com.apple.quarantine "/Applications/$APP_NAME.app"
 \`\`\`
 
-Each release is signed ad hoc. After an update, macOS may ask again for permissions such as Accessibility or Microphone.
+Each release is signed ad hoc.
 
 ## Checksum
 

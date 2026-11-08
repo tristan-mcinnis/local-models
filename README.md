@@ -132,7 +132,7 @@ Or, in Terminal:
 xattr -dr com.apple.quarantine "/Applications/Local Models.app"
 ```
 
-Each release is signed ad hoc. After an update, macOS may ask again for permissions such as Accessibility or Microphone.
+Each release is signed ad hoc.
 
 Check the download against `SHA256SUMS` on the release page:
 
