@@ -30,7 +30,6 @@ install leaves `launch_agent` out and lets the daemon spawn the server.
   and unload models from the launcher.
 - Cotype: streams completions from the daemon-managed llama-server.
 - RTI: `/v1/vision`.
-- Chief of Staff: `/v1/ask` as a fallback.
 - launchd jobs and agent skills call the `local-model` and `local-image` CLIs.
   This is why `make install` copies the runtime to `~/.local/lib/local-models`:
   launchd jobs may not read `~/Documents`.
