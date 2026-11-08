@@ -371,10 +371,14 @@ make menubar           # builds dist/Local Models.app
 make install-menubar   # builds, copies to /Applications, launches
 ```
 
-The app is ad-hoc signed only (no Developer ID or notarization), so macOS
-blocks the first open; see [First open](#first-open). `make dmg` builds the
-release image (`LocalModels-<version>-macos-arm64.dmg` with `SHA256SUMS` and
-`RELEASE_NOTES.md`) into `dist/release/` and verifies it; it uploads nothing.
+`make menubar` signs the bundle with the first Apple Development identity
+on the Mac, or ad hoc when there is none. Neither is a Developer ID, and
+nothing is notarized, so macOS blocks the first open; see
+[First open](#first-open).
+`make dmg` builds the release image (`LocalModels-<version>-macos-arm64.dmg`
+with `SHA256SUMS` and `RELEASE_NOTES.md`) into `dist/release/` and verifies
+it; it re-signs the app ad hoc unless `SIGN_IDENTITY` is set, and it uploads
+nothing.
 `LocalModelsBar --render-proof <dir>` writes the panel
 and settings surfaces to PNGs offscreen, in both appearances, without showing
 a window.
