@@ -467,6 +467,7 @@ class Handler(BaseHTTPRequestHandler):
     # One backend instance per name for the daemon's lifetime, so backends that
     # own child processes (llama-server) keep them across requests.
     backend_cache: dict = {}
+    _backend_cache_lock = threading.Lock()
 
     @classmethod
     def refresh_registry(cls) -> None:
@@ -495,9 +496,14 @@ class Handler(BaseHTTPRequestHandler):
 
     @classmethod
     def backend(cls, name: str):
-        if name not in cls.backend_cache:
-            cls.backend_cache[name] = get_backend(name, cls.registry)
-        return cls.backend_cache[name]
+        # Constructors only configure an owner; loading and health probes run
+        # after this lock is released. Publish exactly one owner per name so
+        # simultaneous first requests share its child and lifecycle locks.
+        # Failed construction publishes nothing and a later caller may retry.
+        with cls._backend_cache_lock:
+            if name not in cls.backend_cache:
+                cls.backend_cache[name] = get_backend(name, cls.registry)
+            return cls.backend_cache[name]
 
     @classmethod
     def sweep_candidates(cls) -> list[str]:
