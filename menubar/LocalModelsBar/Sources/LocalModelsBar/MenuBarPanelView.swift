@@ -19,7 +19,7 @@ import HouseUIKit
 struct ModelPanelRow: View {
     let model: ModelRow
     let isSelected: Bool
-    let isBusy: Bool
+    let progress: String?
     let isEnabled: Bool
     let onHover: () -> Void
     let onTap: () -> Void
@@ -56,7 +56,7 @@ struct ModelPanelRow: View {
         .onHover { if $0 { onHover() } }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(
-            [model.id, model.warm ? "warm" : "not loaded", model.idleLabel]
+            [model.id, progress, model.warm ? "warm" : "not loaded", model.idleLabel]
                 .compactMap { $0 }
                 .joined(separator: ", ")
         )
@@ -75,8 +75,8 @@ struct ModelPanelRow: View {
 
     @ViewBuilder
     private var trailing: some View {
-        if isBusy {
-            Text("Loading…")
+        if let progress {
+            Text(progress)
                 .font(House.TypeToken.meta)
                 .foregroundStyle(House.ColorToken.textTertiary)
         } else if model.warm {
@@ -120,6 +120,15 @@ struct MenuBarPanelView: View {
                 header
                 SlateDivider()
                 rows
+                if let failure = model.operationState.failure {
+                    Text(failure)
+                        .font(House.TypeToken.meta)
+                        .foregroundStyle(House.ColorToken.textSecondary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(House.Spacing.sm)
+                }
                 FooterWell(height: 36) {
                     footerButton(
                         index: model.footerSelectionBase,
@@ -135,6 +144,7 @@ struct MenuBarPanelView: View {
         }
         .frame(width: Self.width)
         .padding(House.Spacing.md)
+
     }
 
     // MARK: Header
@@ -199,7 +209,7 @@ struct MenuBarPanelView: View {
                     ModelPanelRow(
                         model: entry,
                         isSelected: model.selection == index,
-                        isBusy: model.busy == entry.id,
+                        progress: model.operationState.progress(for: entry.id),
                         isEnabled: model.daemonUp && entry.backendAvailable,
                         onHover: { model.selection = index },
                         onTap: {

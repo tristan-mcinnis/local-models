@@ -110,7 +110,10 @@ def status_document(states: list[dict]) -> dict:
     what `GET /health` is for, per backend.
     """
     warm_count = sum(1 for state in states if state.get("warm"))
-    busy = any(state.get("in_flight") for state in states)
+    busy = any(
+        state.get("in_flight") or (state.get("warm_operation") or {}).get("state") in ("queued", "running")
+        for state in states
+    )
     failures = [state for state in states if (state.get("warm_operation") or {}).get("state") == "failed"]
     if busy:
         detail = "Working"
@@ -134,6 +137,8 @@ def status_document(states: list[dict]) -> dict:
 
 def choice_detail(state: dict) -> str:
     operation = state.get("warm_operation") or {}
+    if operation.get("state") == "queued":
+        return "Queued"
     if operation.get("state") == "running":
         return "Warming"
     if operation.get("state") == "failed":

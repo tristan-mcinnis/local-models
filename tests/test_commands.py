@@ -420,8 +420,10 @@ class NonBlockingWarmTests(DaemonHarness, unittest.TestCase):
         """Let the load finish and wait for the claim to come back."""
         backend.release.set()
         deadline = time.monotonic() + 10
-        while serve.USE.in_flight("mlx-vlm") and time.monotonic() < deadline:
+        while (serve.USE.in_flight("mlx-vlm") or
+               (serve.WARM_ATTEMPTS.get("fake-vision") or {}).get("state") in ("queued", "running")) and time.monotonic() < deadline:
             time.sleep(0.01)
+        self.assertNotIn((serve.WARM_ATTEMPTS.get("fake-vision") or {}).get("state"), ("queued", "running"))
 
     def test_it_returns_while_the_model_is_still_loading(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -482,7 +484,7 @@ class NonBlockingWarmTests(DaemonHarness, unittest.TestCase):
             _, body = self.request(server.server_address[1], "POST", "/v1/warm", {"wait": False})
             self.assertIs(body["started"], True)
             deadline = time.monotonic() + 10
-            while serve.USE.in_flight("mlx-vlm") and time.monotonic() < deadline:
+            while (serve.WARM_ATTEMPTS.get("fake-vision") or {}).get("state") in ("queued", "running") and time.monotonic() < deadline:
                 time.sleep(0.01)
             self.assertEqual(serve.USE.in_flight("mlx-vlm"), 0)
             self.assertIn("background warm", captured.getvalue())
@@ -490,6 +492,119 @@ class NonBlockingWarmTests(DaemonHarness, unittest.TestCase):
     def operation(self, server):
         _, body = self.request(server.server_address[1], "GET", "/v1/models")
         return next(m for m in body["models"] if m["id"] == "fake-vision")["warm_operation"]
+
+    def test_queued_warm_returns_promptly_during_unload_and_recovers(self):
+        for failure in (False, True):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
+                backend = BlockingStubBackend()
+                unload_entered = threading.Event()
+                release_unload = threading.Event()
+                self.addCleanup(release_unload.set)
+                self.addCleanup(backend.release.set)
+
+                def unload():
+                    unload_entered.set()
+                    if not release_unload.wait(10):
+                        raise AssertionError("unload never released")
+                    return {"message": "unloaded"}
+
+                original_warm = backend.warm
+
+                def warm(model, payload):
+                    result = original_warm(model, payload)
+                    if failure:
+                        raise serve.BackendError("load failed after queue")
+                    return result
+
+                backend.unload = unload
+                backend.warm = warm
+                server, _, _ = self.boot(Path(tmp), backend=backend)
+                port = server.server_address[1]
+                unload_reply = []
+                unloading = threading.Thread(target=lambda: unload_reply.append(
+                    self.request(port, "POST", "/v1/unload", {})))
+                unloading.start()
+                self.assertTrue(unload_entered.wait(5))
+                began = time.monotonic()
+                status, reply = self.request(port, "POST", "/v1/warm", {"wait": False})
+                self.assertLess(time.monotonic() - began, 1)
+                self.assertEqual(status, 200)
+                self.assertTrue(reply["started"])
+                self.assertEqual(self.operation(server), {"id": reply["operation_id"], "state": "queued"})
+                self.assertEqual(serve.USE.in_flight("mlx-vlm"), 1)
+                self.assertFalse(backend.loading.is_set())
+                _, status_doc = self.request(port, "GET", "/v1/status")
+                self.assertTrue(status_doc["busy"])
+                _, choices = self.request(port, "GET", commands.CHOICES_ROUTE)
+                self.assertEqual(choices["choices"][0]["detail"], "Queued")
+                release_unload.set()
+                unloading.join(5)
+                self.assertFalse(unloading.is_alive())
+                self.assertEqual(unload_reply[0][0], 200)
+                self.assertTrue(backend.loading.wait(5))
+                self.assertEqual(self.operation(server)["state"], "running")
+                self.assertEqual(serve.USE.in_flight("mlx-vlm"), 1)
+                self.assertEqual(serve.USE.idle_state("mlx-vlm"), (0.0, "use"))
+                self.drain(backend)
+                operation = self.operation(server)
+                self.assertEqual(operation["state"], "failed" if failure else "succeeded")
+                if failure:
+                    self.assertEqual(operation["error"], "load failed after queue")
+                self.assertEqual(serve.USE.in_flight("mlx-vlm"), 0)
+
+    def test_backend_lookup_does_not_block_async_reply(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            server, backend, _ = self.boot(Path(tmp))
+            lookup_entered = threading.Event()
+            release_lookup = threading.Event()
+            self.addCleanup(release_lookup.set)
+
+            def lookup(name):
+                lookup_entered.set()
+                if not release_lookup.wait(10):
+                    raise AssertionError("backend lookup never released")
+                return backend
+
+            with mock.patch.object(serve.Handler, "backend", side_effect=lookup):
+                began = time.monotonic()
+                status, reply = self.request(server.server_address[1], "POST", "/v1/warm", {"wait": False})
+                self.assertLess(time.monotonic() - began, 1)
+                self.assertEqual(status, 200)
+                self.assertTrue(reply["started"])
+                self.assertTrue(lookup_entered.wait(5))
+                release_lookup.set()
+                deadline = time.monotonic() + 5
+                while serve.WARM_ATTEMPTS.get("fake-vision")["state"] in ("queued", "running") and time.monotonic() < deadline:
+                    time.sleep(0.01)
+            self.assertEqual(self.operation(server)["state"], "succeeded")
+
+    def test_warm_queues_behind_another_model_without_blocking_reply(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            server, backend, _ = self.boot(Path(tmp), backend=BlockingStubBackend())
+            self.addCleanup(backend.release.set)
+            with serve.MODEL_LEASES.using("mlx-vlm", "other-model"):
+                began = time.monotonic()
+                status, _ = self.request(server.server_address[1], "POST", "/v1/warm", {"wait": False})
+                self.assertLess(time.monotonic() - began, 1)
+                self.assertEqual(status, 200)
+                self.assertEqual(self.operation(server)["state"], "queued")
+                self.assertFalse(backend.loading.is_set())
+            self.assertTrue(backend.loading.wait(5))
+            self.assertEqual(self.operation(server)["state"], "running")
+            self.drain(backend)
+            self.assertEqual(self.operation(server)["state"], "succeeded")
+
+    def test_malformed_warm_result_is_failed_for_blocking_and_async_calls(self):
+        for wait in (True, False):
+            with self.subTest(wait=wait), tempfile.TemporaryDirectory() as tmp:
+                backend = BlockingStubBackend()
+                backend.warm = mock.Mock(return_value={})
+                server, _, _ = self.boot(Path(tmp), backend=backend)
+                status, _ = self.request(server.server_address[1], "POST", "/v1/warm", {"wait": wait})
+                self.assertEqual(status, 502 if wait else 200)
+                self.drain(backend)
+                self.assertEqual(self.operation(server)["state"], "failed")
+                self.assertEqual(self.operation(server)["error"], "unexpected warm response shape")
 
     def test_running_and_success_are_pollable_after_request_disconnects(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -518,6 +633,7 @@ class NonBlockingWarmTests(DaemonHarness, unittest.TestCase):
             self.addCleanup(backend.release.set)
             _, retry = self.request(server.server_address[1], "POST", "/v1/warm", {"wait": False})
             self.assertGreater(retry["operation_id"], first["operation_id"])
+            self.assertTrue(backend.loading.wait(5))
             self.assertEqual(self.operation(server)["state"], "running")
             self.assertNotIn("error", self.operation(server))
             self.drain(backend)

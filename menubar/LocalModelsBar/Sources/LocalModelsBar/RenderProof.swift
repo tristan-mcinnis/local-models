@@ -23,6 +23,8 @@ enum RenderProof {
             let panels: [(String, PanelModel)] = [
                 ("panel-running", runningModel()),
                 ("panel-down", downModel()),
+                ("panel-failed", failedModel()),
+                ("panel-unloading", unloadingModel()),
             ]
             for (surface, model) in panels {
                 if let url = write(
@@ -80,6 +82,20 @@ enum RenderProof {
         let model = PanelModel()
         model.override(models: [], daemonUp: false)
         model.selection = 0
+        return model
+    }
+
+    static func failedModel() -> PanelModel {
+        let model = runningModel()
+        model.override(models: registry, daemonUp: true, operationState: .failed(
+            .warm, model: "gemma-completion", message: "Backend unavailable. Start the backend, then retry."))
+        return model
+    }
+
+    static func unloadingModel() -> PanelModel {
+        let model = runningModel()
+        model.override(models: registry, daemonUp: true,
+                       operationState: .running(.unload, model: "qwen3-vl"))
         return model
     }
 

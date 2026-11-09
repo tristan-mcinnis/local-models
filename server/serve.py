@@ -144,6 +144,57 @@ def backend_is_warm(status: dict) -> bool:
     return bool(status.get("available")) and status.get("loaded_model") is not None
 
 
+class ModelLeases:
+    """Keep one model resident for the complete lifetime of its work.
+
+    Same-model requests may overlap. A queued different-model request waits
+    for active work to finish, and later arrivals cannot starve that switch.
+    This coordinates daemon work, not clients calling a backend port directly.
+    """
+
+    def __init__(self):
+        self._cond = threading.Condition()
+        self._active: dict[str, tuple[str, int]] = {}
+        self._waiting: dict[str, list[tuple[object, str]]] = {}
+
+    @contextlib.contextmanager
+    def using(self, name: str, target: str):
+        ticket = (object(), target)
+        with self._cond:
+            queue = self._waiting.setdefault(name, [])
+            queue.append(ticket)
+            try:
+                while True:
+                    active = self._active.get(name)
+                    # A same-model cohort may join until the first queued
+                    # switch. Different backend names never block each other.
+                    earlier = queue[:queue.index(ticket)]
+                    turn = not any(model != target for _, model in earlier)
+                    if turn and (active is None or active[0] == target):
+                        break
+                    self._cond.wait()
+                queue.remove(ticket)
+                self._active[name] = (target, (active[1] if active else 0) + 1)
+                self._cond.notify_all()
+            except BaseException:
+                queue.remove(ticket)
+                self._cond.notify_all()
+                raise
+        try:
+            yield
+        finally:
+            with self._cond:
+                model, count = self._active[name]
+                if count == 1:
+                    del self._active[name]
+                else:
+                    self._active[name] = (model, count - 1)
+                self._cond.notify_all()
+
+
+MODEL_LEASES = ModelLeases()
+
+
 class BackendUse:
     """When each backend was last used, and who is using it right now.
 
@@ -179,15 +230,32 @@ class BackendUse:
         never talks to a backend being torn down, count it in flight, and stamp
         the clock. Always paired with `end`.
 
-        Separate from `using()` because work can outlive the request that asked
-        for it: a non-blocking warm claims the backend on the request thread,
-        before the caller is told it started, and releases it from the thread
-        doing the loading.
+        Non-blocking warms use reserve() on the request thread and wait_ready()
+        on the worker instead, so admission never blocks the caller behind an
+        unload. Both forms own the same use count until end().
         """
+        with self._cond:
+            self.wait_ready(name)
+            self.reserve(name)
+
+    def reserve(self, name: str) -> None:
+        """Claim queued work now, even if an earlier unload is still running.
+
+        The worker must wait_ready() before touching the backend and end() on
+        every exit. This reservation blocks subsequent idle unloads already
+        from the moment the request acknowledges the work.
+        """
+        with self._cond:
+            self._in_flight[name] = self._in_flight.get(name, 0) + 1
+            self._last_used[name] = self._clock()
+
+    def wait_ready(self, name: str) -> None:
+        """Wait out an earlier unload without taking another use claim."""
         with self._cond:
             while name in self._unloading:
                 self._cond.wait()
-            self._in_flight[name] = self._in_flight.get(name, 0) + 1
+            # The preceding unload clears its idle stamps on release. Restore
+            # this queued request's clock now that its backend is ready.
             self._last_used[name] = self._clock()
 
     def end(self, name: str) -> None:
@@ -325,8 +393,13 @@ class WarmAttempts:
     def begin(self, key: str) -> int:
         with self._lock:
             self._serial += 1
-            self._latest[key] = {"id": self._serial, "state": "running"}
+            self._latest[key] = {"id": self._serial, "state": "queued"}
             return self._serial
+
+    def running(self, key: str, attempt: int) -> None:
+        with self._lock:
+            if self._latest.get(key, {}).get("id") == attempt:
+                self._latest[key] = {"id": attempt, "state": "running"}
 
     def finish(self, key: str, attempt: int, error: str | None = None) -> None:
         with self._lock:
@@ -597,7 +670,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _infer(self, model: dict, payload: dict) -> dict:
         name = backend_name(model)
-        with USE.using(name):
+        with USE.using(name), MODEL_LEASES.using(name, model_path(model)):
             backend = self.backend(name)
             # Idle unloading means the backend that served the last call may be
             # cold now, so ready it first: the caller pays a reload, not a 502.
@@ -758,18 +831,25 @@ class Handler(BaseHTTPRequestHandler):
         # house command contract's.
         warm_payload = {k: v for k, v in payload.items() if k not in ("wait", "argument")}
         wait = wait_requested(payload)
-        USE.begin(name)
         attempt = WARM_ATTEMPTS.begin(key)
+        reserved = False
         handed_off = False
         try:
-            backend = self.backend(name)
             if wait:
-                result = backend.warm(model, warm_payload)
-                WARM_ATTEMPTS.finish(key, attempt)
+                with USE.using(name), MODEL_LEASES.using(name, model_path(model)):
+                    WARM_ATTEMPTS.running(key, attempt)
+                    try:
+                        text = self._warm_text(self.backend(name).warm(model, warm_payload))
+                    except Exception as exc:
+                        WARM_ATTEMPTS.finish(key, attempt, str(exc))
+                        raise
+                    WARM_ATTEMPTS.finish(key, attempt)
             else:
+                USE.reserve(name)
+                reserved = True
                 threading.Thread(
                     target=self._warm_in_background,
-                    args=(name, backend, model, warm_payload, key, attempt),
+                    args=(name, model, warm_payload, key, attempt),
                     name=f"warm-{key}",
                     daemon=True,
                 ).start()
@@ -780,23 +860,36 @@ class Handler(BaseHTTPRequestHandler):
                 raise
             raise BackendError(f"warm failed: {exc}") from exc
         finally:
-            if not handed_off:
+            if reserved and not handed_off:
                 USE.end(name)
         if wait:
-            self._send(200, {"model": key, "warmed": True, "text": result["text"]})
+            self._send(200, {"model": key, "warmed": True, "text": text})
         else:
             self._send(200, {"model": key, "warmed": False, "started": True, "operation_id": attempt})
 
     @staticmethod
-    def _warm_in_background(name: str, backend, model: dict, payload: dict, key: str, attempt: int) -> None:
-        """Record the outcome before releasing the claim, even after disconnect."""
+    def _warm_text(result: dict) -> str:
+        if not isinstance(result, dict) or not isinstance(result.get("text"), str):
+            raise BackendError("unexpected warm response shape")
+        return result["text"]
+
+    @classmethod
+    def _warm_in_background(cls, name: str, model: dict, payload: dict, key: str, attempt: int) -> None:
+        """Wait for admission off the request thread; retain accepted work on disconnect."""
         try:
-            backend.warm(model, payload)
+            USE.wait_ready(name)
+            with MODEL_LEASES.using(name, model_path(model)):
+                WARM_ATTEMPTS.running(key, attempt)
+                try:
+                    cls._warm_text(cls.backend(name).warm(model, payload))
+                except Exception as exc:
+                    WARM_ATTEMPTS.finish(key, attempt, str(exc))
+                    raise
+                else:
+                    WARM_ATTEMPTS.finish(key, attempt)
         except Exception as exc:  # noqa: BLE001 - report through polling and log
             WARM_ATTEMPTS.finish(key, attempt, str(exc))
             print(f"background warm of {name} failed: {exc}", file=sys.stderr, flush=True)
-        else:
-            WARM_ATTEMPTS.finish(key, attempt)
         finally:
             USE.end(name)
 
@@ -832,7 +925,7 @@ class Handler(BaseHTTPRequestHandler):
             raise NotSupported(f"backend '{backend.name}' has no OpenAI chat endpoint")
         # In use for the whole relay, not just the handshake: an SSE stream can
         # run for minutes and must not be unloaded out from under the client.
-        with USE.using(name):
+        with USE.using(name), MODEL_LEASES.using(name, model_path(model)):
             self._relay_chat_completions(backend, key, model, payload)
 
     def _relay_chat_completions(self, backend, key: str, model: dict, payload: dict) -> None:

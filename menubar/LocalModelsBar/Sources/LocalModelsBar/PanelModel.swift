@@ -112,8 +112,8 @@ final class PanelModel: ObservableObject {
     /// True until the first answer lands, and again on a manual refresh. The
     /// dot is dim while this is raised, so "not running" is never guessed.
     @Published private(set) var isRefreshing = true
-    /// The model id a warm or unload call is running against.
-    @Published private(set) var busy: String?
+    @Published private(set) var operationState: ModelOperationState = .idle
+    var busy: String? { operationState.busyModel }
     @Published var selection: Int = 0
 
     // MARK: Collaborators
@@ -121,6 +121,8 @@ final class PanelModel: ObservableObject {
     private let base = URL(string: "http://127.0.0.1:8078")!
     private var pollTimer: Timer?
     private let defaults: UserDefaults
+    typealias Transport = @MainActor (URLRequest) async throws -> (Data, URLResponse)
+    private let transport: Transport
 
     /// When the panel was last opened. Launch counts as an open, so a Mac
     /// that has just started polls at the normal rate until the first idle
@@ -161,8 +163,12 @@ final class PanelModel: ObservableObject {
     /// A background poll owes nobody a particular second.
     static let pollToleranceFraction = 0.15
 
-    init(defaults: UserDefaults = .standard) {
+    init(
+        defaults: UserDefaults = .standard,
+        transport: @escaping Transport = { try await PanelHTTPClient.shared.send($0) }
+    ) {
         self.defaults = defaults
+        self.transport = transport
     }
 
     // MARK: - Derived facts
@@ -364,7 +370,7 @@ final class PanelModel: ObservableObject {
         do {
             var request = URLRequest(url: base.appendingPathComponent("v1/models"))
             request.timeoutInterval = 3
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await transport(request)
             guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
             return try JSONDecoder().decode(ModelList.self, from: data).models
         } catch {
@@ -379,25 +385,43 @@ final class PanelModel: ObservableObject {
     // MARK: - The daemon's verbs
 
     func warm(_ id: String) async {
-        busy = id
-        await post("v1/warm", body: ["model": id], timeout: 180)
-        busy = nil
+        await perform(.warm, model: id, timeout: 180)
     }
 
     func unload(_ id: String) async {
-        busy = id
-        await post("v1/unload", body: ["model": id], timeout: 30)
-        busy = nil
+        await perform(.unload, model: id, timeout: 30)
     }
 
-    private func post(_ path: String, body: [String: Any], timeout: TimeInterval) async {
-        var request = URLRequest(url: base.appendingPathComponent(path))
+    private func perform(_ operation: ModelOperation, model id: String, timeout: TimeInterval) async {
+        // Admission happens on the main actor before any suspension. Multiple
+        // keyboard tasks cannot overwrite each other's running state.
+        guard busy == nil else { return }
+        operationState = .running(operation, model: id)
+        var request = URLRequest(url: base.appendingPathComponent("v1/\(operation.rawValue)"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         request.timeoutInterval = timeout
-        _ = try? await URLSession.shared.data(for: request)
-        await refresh()
+        var outcome = ModelOperationState.idle
+        do {
+            try Task.checkCancellation()
+            request.httpBody = try JSONSerialization.data(withJSONObject: ["model": id])
+            let (data, response) = try await transport(request)
+            guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+            if !(200..<300).contains(http.statusCode) {
+                let detail = (try? JSONDecoder().decode(DaemonCommandError.self, from: data))?.message
+                outcome = .failed(operation, model: id,
+                    message: detail ?? "Daemon returned HTTP \(http.statusCode). Refresh, then retry.")
+            }
+        } catch {
+            // Losing the connection or cancelling a wait does not cancel work
+            // already accepted by the daemon. Never claim that it failed there.
+            outcome = .failed(operation, model: id,
+                message: "Outcome unknown. \(error.localizedDescription) Refresh before retrying.")
+        }
+        // Keep the admission gate until reconciliation finishes. A refresh
+        // cannot erase an error, including when the daemon is unreachable.
+        if !Task.isCancelled { await refresh() }
+        operationState = outcome
     }
 
     // MARK: - The daemon itself
@@ -426,9 +450,11 @@ final class PanelModel: ObservableObject {
 
     /// Fixed state for the offscreen proof, so a PNG never depends on whether
     /// this Mac happens to be running the daemon.
-    func override(models: [ModelRow], daemonUp: Bool, refreshing: Bool = false) {
+    func override(models: [ModelRow], daemonUp: Bool, refreshing: Bool = false,
+                  operationState: ModelOperationState = .idle) {
         self.models = models
         self.daemonUp = daemonUp
         self.isRefreshing = refreshing
+        self.operationState = operationState
     }
 }

@@ -339,9 +339,13 @@ already worked:
 - Nothing may block the caller for more than a second, and warming a cold
   model takes tens of seconds. So `POST /v1/warm` takes `{"wait": false}`:
   it starts the load, returns `{"warmed": false, "started": true}` at once,
-  and the caller polls `/v1/status`. The model reads as busy from the instant
-  that reply is sent, not from when the load ends, so the idle sweeper can
-  never unload a model mid-load. Omitting `wait` keeps the blocking reply
+  and the caller polls `/v1/status`. Accepted work reads as busy immediately,
+  including while queued behind an unload or a different model's request.
+  The request reserves the use claim before acknowledging; the worker waits
+  for any earlier unload and releases that claim after recording its outcome.
+  Waiting and backend construction happen on the worker, so admission does
+  not hold the caller behind that work. The idle sweeper cannot unload a
+  model while it loads. Omitting `wait` keeps the blocking reply
   every existing client gets.
 - The registry changes while the daemon runs, so a choice list frozen into a
   file written at launch would go stale. The manifest names a route to read
@@ -353,11 +357,13 @@ polling it never keeps a model warm.
 
 Warm commands also record their latest attempt in each model's
 `warm_operation`: null before any attempt, otherwise `{id, state, error?}`.
-States are `running`, `succeeded`, and `failed`; failures include `error`.
+States are `queued`, `running`, `succeeded`, and `failed`; failures include
+`error`. Queued work already owns a backend use claim but waits for an earlier
+unload or another model's use to finish; running work also owns its model lease.
 The non-blocking reply's `operation_id` matches this `id`. Poll `/v1/models`
 for the result; `/v1/status` summarizes failures when no work is active and
-model choices show Warming or the failure reason. Retry replaces the prior
-attempt and clears its error. Overlapping requests still run, but an older
+model choices show Queued, Warming, or the failure reason. Retry replaces
+the prior attempt and clears its error. Overlapping requests still run, but an older
 completion cannot replace a newer attempt's record. A changed id means the
 observed attempt was superseded, not cancelled.
 
@@ -367,6 +373,13 @@ the source of `warm`. Records are process-local, latest-only, and reset on
 daemon restart. Disconnecting does not cancel accepted work. There is no
 cancellation endpoint or durable job history. See [state flows](docs/state-flows.md)
 for the reviewed flows and remaining gaps.
+
+Requests through the daemon hold a model lease for their full inference or
+stream lifetime. A different model on the same backend waits for active work
+to finish; same-model requests can overlap. Once a model switch is queued,
+later arrivals cannot keep the old model running indefinitely. Independent
+backends remain independent. Direct calls to backend ports bypass this
+coordination. Explicit unload retains its documented force-after-drain policy.
 
 ### Menu bar
 
@@ -421,7 +434,7 @@ a window.
 ## Build from source
 
 ```bash
-make test                          # 147 unit tests + daemon smoke + publish scrub
+make test                          # Python/Swift tests + daemon smoke + publish scrub
 cd menubar/LocalModelsBar && swift build && swift test
 make menubar                       # app bundle in dist/
 make dmg                           # release DMG + SHA256SUMS in dist/release/
@@ -474,3 +487,8 @@ full license texts are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+Warm and unload actions show their own progress labels. A failed command keeps
+the daemon's error and hint visible until retry. Timeout or cancelled waiting
+reports an unknown outcome: refresh before retrying, since accepted daemon
+work may still finish. The panel admits one action at a time.
