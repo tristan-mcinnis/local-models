@@ -310,6 +310,41 @@ class BackendUse:
                     self._cond.notify_all()
 
 
+class WarmAttempts:
+    """Latest warm command per model, separate from live model residency.
+
+    IDs are monotonic within one daemon lifetime. An older concurrent worker
+    cannot overwrite the outcome of a newer request. No durable job history.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._serial = 0
+        self._latest: dict[str, dict] = {}
+
+    def begin(self, key: str) -> int:
+        with self._lock:
+            self._serial += 1
+            self._latest[key] = {"id": self._serial, "state": "running"}
+            return self._serial
+
+    def finish(self, key: str, attempt: int, error: str | None = None) -> None:
+        with self._lock:
+            if self._latest.get(key, {}).get("id") != attempt:
+                return
+            self._latest[key] = {"id": attempt, "state": "failed" if error is not None else "succeeded"}
+            if error is not None:
+                self._latest[key]["error"] = error
+
+    def get(self, key: str) -> dict | None:
+        with self._lock:
+            value = self._latest.get(key)
+            return dict(value) if value is not None else None
+
+
+WARM_ATTEMPTS = WarmAttempts()
+
+
 #: The daemon's one use tracker, shared by the request handler and the sweeper.
 USE = BackendUse()
 
@@ -620,6 +655,7 @@ class Handler(BaseHTTPRequestHandler):
                     "idle_seconds": None if idle is None else round(idle, 1),
                     "idle_basis": idle_basis,
                     "in_flight": USE.in_flight(name),
+                    "warm_operation": WARM_ATTEMPTS.get(key),
                 }
             )
         return out
@@ -715,40 +751,46 @@ class Handler(BaseHTTPRequestHandler):
         # Neither field is a backend's business: one is this route's, one is the
         # house command contract's.
         warm_payload = {k: v for k, v in payload.items() if k not in ("wait", "argument")}
-        if wait_requested(payload):
-            with USE.using(name):
-                result = self.backend(name).warm(model, warm_payload)
-            self._send(200, {"model": key, "warmed": True, "text": result["text"]})
-            return
-        # Non-blocking: the claim is taken here, on the request thread, so that
-        # from the instant the caller is told the work started the backend
-        # already reads as busy and the sweeper cannot unload a model mid-load.
+        wait = wait_requested(payload)
         USE.begin(name)
-        started = False
+        attempt = WARM_ATTEMPTS.begin(key)
+        handed_off = False
         try:
             backend = self.backend(name)
-            threading.Thread(
-                target=self._warm_in_background,
-                args=(name, backend, model, warm_payload),
-                name=f"warm-{key}",
-                daemon=True,
-            ).start()
-            started = True
+            if wait:
+                result = backend.warm(model, warm_payload)
+                WARM_ATTEMPTS.finish(key, attempt)
+            else:
+                threading.Thread(
+                    target=self._warm_in_background,
+                    args=(name, backend, model, warm_payload, key, attempt),
+                    name=f"warm-{key}",
+                    daemon=True,
+                ).start()
+                handed_off = True
+        except Exception as exc:
+            WARM_ATTEMPTS.finish(key, attempt, str(exc))
+            if isinstance(exc, (BackendError, NotSupported, ValueError)):
+                raise
+            raise BackendError(f"warm failed: {exc}") from exc
         finally:
-            if not started:
-                # Never built, never started: hand the claim straight back.
+            if not handed_off:
                 USE.end(name)
-        self._send(200, {"model": key, "warmed": False, "started": True})
+        if wait:
+            self._send(200, {"model": key, "warmed": True, "text": result["text"]})
+        else:
+            self._send(200, {"model": key, "warmed": False, "started": True, "operation_id": attempt})
 
     @staticmethod
-    def _warm_in_background(name: str, backend, model: dict, payload: dict) -> None:
-        """Load the model on a claim the request thread already took, and give
-        it back however the load ends. There is nobody to answer, so a failure
-        is logged; the caller polls the status document either way."""
+    def _warm_in_background(name: str, backend, model: dict, payload: dict, key: str, attempt: int) -> None:
+        """Record the outcome before releasing the claim, even after disconnect."""
         try:
             backend.warm(model, payload)
-        except Exception as exc:  # noqa: BLE001 - nothing to answer, only to log
+        except Exception as exc:  # noqa: BLE001 - report through polling and log
+            WARM_ATTEMPTS.finish(key, attempt, str(exc))
             print(f"background warm of {name} failed: {exc}", file=sys.stderr, flush=True)
+        else:
+            WARM_ATTEMPTS.finish(key, attempt)
         finally:
             USE.end(name)
 

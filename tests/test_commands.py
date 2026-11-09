@@ -304,6 +304,9 @@ class DaemonHarness:
 
     def boot(self, tmp: Path, commands_home: Path | None = None, backend=None):
         backend = backend or StubBackend()
+        attempts = mock.patch.object(serve, "WARM_ATTEMPTS", serve.WarmAttempts())
+        attempts.start()
+        self.addCleanup(attempts.stop)
         serve.Handler.backend_cache = {}
         self.addCleanup(setattr, serve.Handler, "backend_cache", {})
         patch = mock.patch.object(serve, "get_backend", side_effect=lambda *a, **k: backend)
@@ -483,6 +486,103 @@ class NonBlockingWarmTests(DaemonHarness, unittest.TestCase):
                 time.sleep(0.01)
             self.assertEqual(serve.USE.in_flight("mlx-vlm"), 0)
             self.assertIn("background warm", captured.getvalue())
+
+    def operation(self, server):
+        _, body = self.request(server.server_address[1], "GET", "/v1/models")
+        return next(m for m in body["models"] if m["id"] == "fake-vision")["warm_operation"]
+
+    def test_running_and_success_are_pollable_after_request_disconnects(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            server, backend, reply = self.start_load(Path(tmp))
+            self.assertEqual(self.operation(server), {"id": reply["operation_id"], "state": "running"})
+            _, choices = self.request(server.server_address[1], "GET", commands.CHOICES_ROUTE)
+            self.assertEqual(choices["choices"][0]["detail"], "Warming")
+            self.drain(backend)
+            self.assertEqual(self.operation(server), {"id": reply["operation_id"], "state": "succeeded"})
+
+    def test_failure_is_visible_and_retry_replaces_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = BlockingStubBackend()
+            original = backend.warm
+            backend.warm = mock.Mock(side_effect=serve.BackendError("no weights"))
+            server, _, _ = self.boot(Path(tmp), backend=backend)
+            _, first = self.request(server.server_address[1], "POST", "/v1/warm", {"wait": False})
+            self.drain(backend)
+            self.assertEqual(self.operation(server)["state"], "failed")
+            self.assertEqual(self.operation(server)["error"], "no weights")
+            _, status = self.request(server.server_address[1], "GET", "/v1/status")
+            self.assertFalse(status["busy"])
+            self.assertIn("no weights", status["detail"])
+            backend.release.clear()
+            backend.warm = original
+            self.addCleanup(backend.release.set)
+            _, retry = self.request(server.server_address[1], "POST", "/v1/warm", {"wait": False})
+            self.assertGreater(retry["operation_id"], first["operation_id"])
+            self.assertEqual(self.operation(server)["state"], "running")
+            self.assertNotIn("error", self.operation(server))
+            self.drain(backend)
+            self.assertEqual(self.operation(server)["state"], "succeeded")
+            _, status = self.request(server.server_address[1], "GET", "/v1/status")
+            self.assertNotIn("failed", status["detail"])
+
+    def test_thread_start_failure_records_failure_and_releases_claim(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            server, _, _ = self.boot(Path(tmp))
+            # Run the route directly so patching Thread.start cannot affect the
+            # HTTP server's own request thread creation.
+            handler = object.__new__(serve.Handler)
+            handler._payload = lambda: {"wait": False}
+            with mock.patch.object(serve.threading.Thread, "start", side_effect=RuntimeError("cannot start")):
+                with self.assertRaisesRegex(serve.BackendError, "cannot start"):
+                    handler.post_warm()
+            self.assertEqual(serve.USE.in_flight("mlx-vlm"), 0)
+            self.assertEqual(self.operation(server)["state"], "failed")
+
+    def test_old_completion_cannot_overwrite_newer_attempt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = StubBackend()
+            first_started = threading.Event()
+            second_started = threading.Event()
+            release_first = threading.Event()
+            release_second = threading.Event()
+            self.addCleanup(release_first.set)
+            self.addCleanup(release_second.set)
+            lock = threading.Lock()
+            calls = []
+
+            def warm(model, payload):
+                with lock:
+                    calls.append(1)
+                    index = len(calls)
+                if index == 1:
+                    first_started.set()
+                    if not release_first.wait(10):
+                        raise AssertionError("first warm never released")
+                    raise serve.BackendError("late error")
+                second_started.set()
+                if not release_second.wait(10):
+                    raise AssertionError("second warm never released")
+                return {"text": "ok"}
+
+            backend.warm = warm
+            server, _, _ = self.boot(Path(tmp), backend=backend)
+            port = server.server_address[1]
+            _, first = self.request(port, "POST", "/v1/warm", {"wait": False})
+            self.assertTrue(first_started.wait(10))
+            _, newer = self.request(port, "POST", "/v1/warm", {"wait": False})
+            self.assertTrue(second_started.wait(10))
+            self.assertGreater(newer["operation_id"], first["operation_id"])
+            release_second.set()
+            deadline = time.monotonic() + 10
+            while self.operation(server)["state"] == "running" and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(self.operation(server)["state"], "succeeded")
+            release_first.set()
+            deadline = time.monotonic() + 10
+            while serve.USE.in_flight("mlx-vlm") and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(serve.USE.in_flight("mlx-vlm"), 0)
+            self.assertEqual(self.operation(server), {"id": newer["operation_id"], "state": "succeeded"})
 
     def test_waiting_is_still_the_default(self) -> None:
         """Other apps depend on the reply they already get; this is additive."""

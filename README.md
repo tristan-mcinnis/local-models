@@ -224,11 +224,11 @@ curl -s localhost:8078/health | jq           # per-backend availability
 | Route | Request | Success body | State |
 |---|---|---|---|
 | `GET /health` | | `{status, service, backends: {name: {available, loaded_model, detail}}}` | serving |
-| `GET /v1/models` | | `{default, idle_unload_seconds, models: [{id, backend, capabilities, path, warm, backend_available, endpoint, idle_seconds, idle_basis, in_flight}]}` | serving |
+| `GET /v1/models` | | `{default, idle_unload_seconds, models: [{id, backend, capabilities, path, warm, backend_available, endpoint, idle_seconds, idle_basis, in_flight, warm_operation}]}` | serving |
 | `POST /v1/vision` | `{model?, prompt?, image_b64 \| image_path, mime?, max_tokens?, timeout?}` | `{model, text}` | serving (mlx-vlm) |
 | `POST /v1/ask` | `{model?, prompt, max_tokens?, timeout?}` | `{model, text}` | serving |
 | `POST /v1/complete` | `{model?, prompt, system?, max_tokens?, timeout?}` | `{model, text}` | serving (llama-gguf, ~57 ms warm first token) |
-| `POST /v1/warm` | `{model?, wait?}` | `{model, warmed, text}`, or `{model, warmed: false, started: true}` when `wait` is `false` | serving |
+| `POST /v1/warm` | `{model?, wait?}` | `{model, warmed, text}`, or `{model, warmed: false, started: true, operation_id}` when `wait` is `false` | serving |
 | `POST /v1/unload` | `{model?}` | `{model, unloaded, message}` | serving |
 | `POST /v1/transcribe` | | | phase 2 (501) |
 | `GET /v1/status` | | `{app, ok, busy, warm, detail}`, the House command status document | serving |
@@ -350,6 +350,23 @@ already worked:
 `GET /v1/status` is derived from the same per-model state `GET /v1/models`
 reports (one source of truth) and, like that route, reading it is not use, so
 polling it never keeps a model warm.
+
+Warm commands also record their latest attempt in each model's
+`warm_operation`: null before any attempt, otherwise `{id, state, error?}`.
+States are `running`, `succeeded`, and `failed`; failures include `error`.
+The non-blocking reply's `operation_id` matches this `id`. Poll `/v1/models`
+for the result; `/v1/status` summarizes failures when no work is active and
+model choices show Warming or the failure reason. Retry replaces the prior
+attempt and clears its error. Overlapping requests still run, but an older
+completion cannot replace a newer attempt's record. A changed id means the
+observed attempt was superseded, not cancelled.
+
+These are command outcomes, not residency: success does not promise a model
+remains loaded, and failure can occur after loading. Backend status remains
+the source of `warm`. Records are process-local, latest-only, and reset on
+daemon restart. Disconnecting does not cancel accepted work. There is no
+cancellation endpoint or durable job history. See [state flows](docs/state-flows.md)
+for the reviewed flows and remaining gaps.
 
 ### Menu bar
 

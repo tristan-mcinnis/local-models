@@ -111,8 +111,11 @@ def status_document(states: list[dict]) -> dict:
     """
     warm_count = sum(1 for state in states if state.get("warm"))
     busy = any(state.get("in_flight") for state in states)
+    failures = [state for state in states if (state.get("warm_operation") or {}).get("state") == "failed"]
     if busy:
         detail = "Working"
+    elif failures:
+        detail = f"Warm failed: {failures[0]['id']}: {failures[0]['warm_operation']['error']}"
     elif warm_count == 1:
         detail = "1 model warm"
     elif warm_count:
@@ -129,6 +132,15 @@ def status_document(states: list[dict]) -> dict:
     }
 
 
+def choice_detail(state: dict) -> str:
+    operation = state.get("warm_operation") or {}
+    if operation.get("state") == "running":
+        return "Warming"
+    if operation.get("state") == "failed":
+        return f"Warm failed: {operation['error']}"
+    return "Warm" if state.get("warm") else "Cold"
+
+
 def model_choices(states: list[dict]) -> list[dict]:
     """What a `needs: "choice"` command can be pointed at, right now.
 
@@ -140,7 +152,7 @@ def model_choices(states: list[dict]) -> list[dict]:
         {
             "id": state["id"],
             "title": state["id"],
-            "detail": "Warm" if state.get("warm") else "Cold",
+            "detail": choice_detail(state),
         }
         for state in states
     ]
